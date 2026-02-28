@@ -1,0 +1,13 @@
+<b>On-Chain</b>
+{{ divider_line }}
+
+{% if top_gainers %}<b>Top Gainers (24h):</b>
+{% for pool in top_gainers %}• <a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a> ({{ pool.change }})
+↳ Vol {{ pool.volume }} · Liq {{ pool.liquidity }} · {{ pool.mcap_label }} {{ pool.mcap }}
+{% endfor %}{% endif %}
+
+{% if top_losers %}<b>Top Losers (24h):</b>
+{% for pool in top_losers %}• <a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a> ({{ pool.change }})
+↳ Vol {{ pool.volume }} · Liq {{ pool.liquidity }} · {{ pool.mcap_label }} {{ pool.mcap }}
+{% endfor %}{% endif %}
+{{ divider_line }}

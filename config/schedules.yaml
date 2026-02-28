@@ -1,0 +1,18 @@
+scheduler:
+  timezone: UTC
+  jobs:
+  - id: global_crypto
+    type: global
+    chain: ''
+    time: '16:10'
+    enabled: true
+  - id: onchain_solana
+    type: onchain
+    chain: solana
+    time: 09:05
+    enabled: false
+  - id: onchain_base
+    type: onchain
+    chain: base
+    time: 09:15
+    enabled: false

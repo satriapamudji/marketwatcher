@@ -1,0 +1,18 @@
+<i>{{ summary.timestamp.strftime(config.timestamp_format) }}</i>
+{{ config.divider_style * 10 }}
+
+<b>Global MCAP:</b> {{ summary.formatted_global_mcap }}
+<b>╰➤ 1D:</b> {{ summary.formatted_global_mcap_1d }} | <b>7D:</b> {{ summary.formatted_global_mcap_7d }} | <b>14D:</b> {{ summary.formatted_global_mcap_14d }}
+
+<b>BTC Dominance:</b> {{ summary.formatted_btc_dominance }}
+<b>╰➤ 1D:</b> {{ summary.formatted_btc_dominance_1d }} | <b>7D:</b> {{ summary.formatted_btc_dominance_7d }} | <b>14D:</b> {{ summary.formatted_btc_dominance_14d }}
+
+{{ config.divider_style * 10 }}
+
+<b>Top Gainers (24h):</b>
+{% for cat in summary.top_gainers %}• <a href="https://www.coingecko.com/en/categories/{{ cat.category_id }}">{{ cat.category_name | escape_html }}</a> ({{ cat.pct_change_24h | fmt_signed_pct(decimals=config.decimals) }})
+{% endfor %}
+<b>Top Losers (24h):</b>
+{% for cat in summary.top_losers %}• <a href="https://www.coingecko.com/en/categories/{{ cat.category_id }}">{{ cat.category_name | escape_html }}</a> ({{ cat.pct_change_24h | fmt_signed_pct(decimals=config.decimals) }})
+{% endfor %}
+{{ config.divider_style * 10 }}
