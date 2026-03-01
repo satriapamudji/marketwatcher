@@ -671,11 +671,15 @@ def main():
 
     args = parser.parse_args()
 
-    # Setup logging
-    logging_config.setup_logging(level=args.log_level)
+    # Load config first
+    cfg = config.load_config(config_dir=args.config_dir)
 
-    # Load config
-    config.load_config(config_dir=args.config_dir)
+    # Setup logging with config values
+    logging_config.setup_logging(
+        level=args.log_level or cfg.logging.level,
+        jsonl_path=cfg.logging.jsonl_path if cfg.logging.jsonl_path else None,
+        console=cfg.logging.console,
+    )
 
     # Run command
     if args.command is None:

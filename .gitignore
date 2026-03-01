@@ -41,7 +41,8 @@ ENV/
 *.sqlite
 *.sqlite3
 *.log
-*.jsonl
+logs/
+onchain_history.jsonl
 
 # Claude
 .claude/

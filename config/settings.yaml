@@ -1,5 +1,17 @@
 # MarketWatcher Settings
 
+# Logging configuration
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO
+
+  # JSONL log file path (relative to project root or absolute)
+  # Set to null/empty to disable file logging
+  jsonl_path: logs/marketwatcher.jsonl
+
+  # Console output (always enabled in TUI)
+  console: true
+
 # Report configuration
 report:
   # Number of categories to show

@@ -1,0 +1,15 @@
+[Unit]
+Description=MarketWatcher Scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/marketwatcher
+Environment=PYTHONPATH=/opt/marketwatcher/src
+ExecStart=/usr/bin/python3 -m marketwatcher.cli scheduler
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

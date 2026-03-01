@@ -20,6 +20,13 @@ class TelegramConfig:
 
 
 @dataclass
+class LoggingConfig:
+    level: str = "INFO"
+    jsonl_path: str = "logs/marketwatcher.jsonl"
+    console: bool = True
+
+
+@dataclass
 class ProviderConfig:
     cache_ttl: int = 300
     timeout: int = 30
@@ -90,6 +97,7 @@ class Config:
     report: ReportConfig = field(default_factory=ReportConfig)
     onchain: OnchainConfig = field(default_factory=OnchainConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     database_path: str = "marketwatcher.db"
     log_level: str = "INFO"
     project_root: Path = field(default_factory=Path.cwd)
@@ -153,6 +161,11 @@ def load_config(config_dir: Path | None = None, env_file: Path | None = None) ->
             for key, value in yaml_config["onchain"].items():
                 if hasattr(config.onchain, key):
                     setattr(config.onchain, key, value)
+
+        if "logging" in yaml_config:
+            for key, value in yaml_config["logging"].items():
+                if hasattr(config.logging, key):
+                    setattr(config.logging, key, value)
 
     # Apply scheduler YAML settings (separate file managed by TUI)
     if schedules_yaml:
