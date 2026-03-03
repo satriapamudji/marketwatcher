@@ -471,13 +471,6 @@ def scheduler(args) -> int:
                     dry_run=False,
                     watchlist_id=job.watchlist_id or "main",
                     chat_id=job.chat_id,
-                    check_alerts=True,
-                ))
-            elif job.type == "alerts":
-                rc = alerts_cmd(argparse.Namespace(
-                    dry_run=False,
-                    watchlist_id=job.watchlist_id or "main",
-                    chat_id=job.chat_id,
                 ))
             else:
                 logger.error(f"Unknown job type: {job.type}")
@@ -627,15 +620,14 @@ def watchlist_cmd(args) -> int:
         result = publisher.send_message(_get_chat_id(cfg, args), message)
         console.print(f"[green]OK[/green] Message sent! Message ID: {result.message_id}")
 
-        # Piggyback alert check
-        if getattr(args, "check_alerts", False):
-            from marketwatcher.alerts import check_alerts, format_alerts_batch
-            triggered = check_alerts(wl, report_data)
-            if triggered:
-                alert_msg = format_alerts_batch(triggered)
-                alert_chat_id = wl.get("alert_chat_id") or _get_chat_id(cfg, args)
-                publisher.send_message(alert_chat_id, alert_msg)
-                console.print(f"[yellow]{len(triggered)} alert(s) sent![/yellow]")
+        # Always check alerts on watchlist reports
+        from marketwatcher.alerts import check_alerts, format_alerts_batch
+        triggered = check_alerts(wl, report_data)
+        if triggered:
+            alert_msg = format_alerts_batch(triggered)
+            alert_chat_id = wl.get("alert_chat_id") or _get_chat_id(cfg, args)
+            publisher.send_message(alert_chat_id, alert_msg)
+            console.print(f"[yellow]{len(triggered)} alert(s) sent![/yellow]")
 
         return 0
 
@@ -1009,7 +1001,6 @@ def main():
     )
     watchlist_parser.add_argument("--dry-run", action="store_true", help="Preview without sending")
     watchlist_parser.add_argument("--watchlist-id", default="main", help="Watchlist ID (default: main)")
-    watchlist_parser.add_argument("--check-alerts", action="store_true", help="Also check alerts after report")
     watchlist_parser.set_defaults(func=watchlist_cmd)
 
     # Watchlist manage command

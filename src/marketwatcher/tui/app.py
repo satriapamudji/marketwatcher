@@ -579,11 +579,10 @@ def _add_job(console: Console, cfg, state: TuiState):
     console.print("    [yellow]1[/yellow]. Global (market summary)")
     console.print("    [yellow]2[/yellow]. On-Chain (chain movers)")
     console.print("    [yellow]3[/yellow]. Global On-Chain (DeFi TVL overview)")
-    console.print("    [yellow]4[/yellow]. Watchlist (tracked tokens)")
-    console.print("    [yellow]5[/yellow]. Alerts (watchlist price/pct alerts)")
+    console.print("    [yellow]4[/yellow]. Watchlist (tracked tokens + alerts)")
     console.print("    [yellow]0[/yellow]. Cancel")
 
-    choice = Prompt.ask("Type", choices=["0", "1", "2", "3", "4", "5"], default="1")
+    choice = Prompt.ask("Type", choices=["0", "1", "2", "3", "4"], default="1")
 
     if choice == "0":
         return cfg
@@ -594,8 +593,6 @@ def _add_job(console: Console, cfg, state: TuiState):
         job_type = "global_onchain"
     elif choice == "4":
         job_type = "watchlist"
-    elif choice == "5":
-        job_type = "alerts"
     else:
         job_type = "onchain"
     chain = ""
@@ -603,7 +600,7 @@ def _add_job(console: Console, cfg, state: TuiState):
 
     if job_type == "onchain":
         chain = _select_chain(console)
-    elif job_type in ("watchlist", "alerts"):
+    elif job_type == "watchlist":
         watchlist_id = Prompt.ask("Watchlist ID", default="main").strip()
 
     # Ask for schedule mode
