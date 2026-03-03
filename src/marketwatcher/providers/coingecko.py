@@ -174,6 +174,36 @@ class CoinGeckoProvider:
         logger.info(f"Found {len(categories)} categories with market data")
         return categories
 
+    def get_simple_prices(self, coin_ids: list[str]) -> dict[str, dict[str, float]]:
+        """Batch-fetch prices and 24h changes via /simple/price.
+
+        Single API call for all CEX tokens — much lighter than per-token get_coin().
+
+        Args:
+            coin_ids: List of CoinGecko coin IDs (e.g. ["bitcoin", "ethereum"])
+
+        Returns:
+            Dict keyed by coin_id: {"price": float, "change_24h": float | None}
+        """
+        if not coin_ids:
+            return {}
+
+        logger.info(f"Fetching simple prices for {len(coin_ids)} coins")
+        data = self._request("/simple/price", params={
+            "ids": ",".join(coin_ids),
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+        })
+
+        result = {}
+        for coin_id in coin_ids:
+            coin_data = data.get(coin_id, {})
+            result[coin_id] = {
+                "price": coin_data.get("usd", 0),
+                "change_24h": coin_data.get("usd_24h_change"),
+            }
+        return result
+
     def get_coin(self, coin_id: str) -> dict[str, Any]:
         """Fetch single coin data: price, mcap, 24h/7d changes.
 

@@ -393,6 +393,93 @@ def _next_interval_run(now: 'datetime', interval_hours: int, offset_minutes: int
     return slot_start
 
 
+def alert_loop(args) -> None:
+    """Independent alert checking loop (runs in its own thread).
+
+    Checks all watchlists with alert thresholds on a fast interval
+    (default 15 min). Lightweight — uses batch price fetch, not full reports.
+    """
+    import time
+
+    from marketwatcher.logging_config import get_logger
+
+    logger = get_logger("alert-loop")
+    logger.info("Alert loop started")
+    console.print("[bold]Alert loop started[/bold]")
+
+    while True:
+        try:
+            cfg = config.reload_config()
+            interval = cfg.alerts.check_interval_minutes
+
+            from marketwatcher.watchlist import load_watchlists
+            from marketwatcher.alerts import (
+                watchlist_has_alerts, fetch_alert_prices,
+                check_alerts, format_alerts_batch,
+            )
+            from marketwatcher.providers.coingecko import CoinGeckoProvider
+            from marketwatcher.providers.geckoterminal import GeckoTerminalProvider
+            from marketwatcher.publishers.telegram import TelegramPublisher
+
+            data = load_watchlists()
+            all_wls = data.get("watchlists", [])
+            alert_wls = [wl for wl in all_wls if watchlist_has_alerts(wl)]
+
+            if not alert_wls:
+                logger.debug("No watchlists with alert thresholds, sleeping")
+                time.sleep(interval * 60)
+                continue
+
+            logger.info(f"Checking alerts for {len(alert_wls)} watchlist(s)")
+
+            cg = CoinGeckoProvider(
+                cache_ttl=cfg.provider.cache_ttl,
+                timeout=cfg.provider.timeout,
+                retry_count=cfg.provider.retry_count,
+                backoff_factor=cfg.provider.backoff_factor,
+            )
+            gt = GeckoTerminalProvider(
+                cache_ttl=cfg.provider.cache_ttl,
+                timeout=cfg.provider.timeout,
+            )
+
+            total_alerts = 0
+            publisher = None
+
+            for wl in alert_wls:
+                try:
+                    price_data = fetch_alert_prices(wl, cg, gt)
+                    triggered = check_alerts(wl, price_data)
+
+                    if triggered:
+                        if publisher is None:
+                            publisher = TelegramPublisher(cfg.telegram.bot_token)
+                        message = format_alerts_batch(triggered)
+                        alert_chat_id = wl.get("alert_chat_id") or cfg.telegram.chat_id
+                        publisher.send_message(alert_chat_id, message)
+                        total_alerts += len(triggered)
+                        logger.info(f"Sent {len(triggered)} alert(s) for {wl.get('name', wl.get('id'))}")
+                except Exception as e:
+                    logger.error(f"Alert check failed for {wl.get('id')}: {e}")
+
+            cg.close()
+            gt.close()
+
+            if total_alerts:
+                console.print(f"[yellow]Alert loop: {total_alerts} alert(s) sent[/yellow]")
+            else:
+                logger.debug("Alert loop: no alerts triggered")
+
+            time.sleep(interval * 60)
+
+        except KeyboardInterrupt:
+            logger.info("Alert loop stopped")
+            return
+        except Exception as e:
+            logger.error(f"Alert loop error: {e}")
+            time.sleep(60)
+
+
 def scheduler(args) -> int:
     """Run multi-job scheduler using config/schedules.yaml."""
     import argparse
@@ -466,6 +553,8 @@ def scheduler(args) -> int:
                 rc = onchain(argparse.Namespace(network=job.chain, dry_run=False, chat_id=job.chat_id))
             elif job.type == "global_onchain":
                 rc = global_onchain(argparse.Namespace(dry_run=False, chat_id=job.chat_id))
+            elif job.type == "macro":
+                rc = macro(argparse.Namespace(dry_run=False, chat_id=job.chat_id))
             elif job.type == "watchlist":
                 rc = watchlist_cmd(argparse.Namespace(
                     dry_run=False,
@@ -573,6 +662,40 @@ def global_onchain(args) -> int:
 
     except Exception as e:
         logger.error(f"Global on-chain fetch failed: {e}")
+        console.print(f"\n[bold red]Error:[/bold red] {e}")
+        return 1
+
+
+def macro(args) -> int:
+    """Fetch and send global macro report (equities, rates, FX, commodities)."""
+    from marketwatcher.logging_config import get_logger
+
+    logger = get_logger("cli")
+
+    cfg = config.get_config()
+    console.print("[bold]Fetching global macro data...[/bold]")
+
+    try:
+        from marketwatcher.reports.macro import build_macro_report
+        from marketwatcher.formatters.macro import render_macro_report
+        from marketwatcher.publishers.telegram import TelegramPublisher
+
+        report_data = build_macro_report()
+        message = render_macro_report(report_data, cfg.report)
+
+        if args.dry_run:
+            console.print("[yellow]Dry-run mode - not sending[/yellow]")
+            console.print("\n[bold]Message:[/bold]\n")
+            console.print(_console_safe_preview(message))
+            return 0
+
+        publisher = TelegramPublisher(cfg.telegram.bot_token)
+        result = publisher.send_message(_get_chat_id(cfg, args), message)
+        console.print(f"[green]OK[/green] Message sent! Message ID: {result.message_id}")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Macro fetch failed: {e}")
         console.print(f"\n[bold red]Error:[/bold red] {e}")
         return 1
 
@@ -774,8 +897,7 @@ def alerts_cmd(args) -> int:
         from marketwatcher.watchlist import get_watchlist
         from marketwatcher.providers.coingecko import CoinGeckoProvider
         from marketwatcher.providers.geckoterminal import GeckoTerminalProvider
-        from marketwatcher.reports.watchlist import build_watchlist_report
-        from marketwatcher.alerts import check_alerts, format_alerts_batch
+        from marketwatcher.alerts import check_alerts, fetch_alert_prices, format_alerts_batch
         from marketwatcher.publishers.telegram import TelegramPublisher
 
         wl = get_watchlist(watchlist_id)
@@ -787,7 +909,7 @@ def alerts_cmd(args) -> int:
                                retry_count=cfg.provider.retry_count, backoff_factor=cfg.provider.backoff_factor)
         gt = GeckoTerminalProvider(cache_ttl=cfg.provider.cache_ttl, timeout=cfg.provider.timeout)
 
-        report_data = build_watchlist_report(wl, cg, gt, cfg.report)
+        report_data = fetch_alert_prices(wl, cg, gt)
         cg.close()
         gt.close()
 
@@ -860,8 +982,9 @@ def bot_scheduler(args) -> int:
         console.print("[red]TELEGRAM_BOT_TOKEN not set[/red]")
         return 1
 
-    console.print("[bold]Starting bot + scheduler...[/bold]")
+    console.print("[bold]Starting bot + scheduler + alert loop...[/bold]")
     console.print("Bot commands: /watch, /watchdex, /unwatch, /watchlist, /watchlists")
+    console.print(f"Alert loop: every {cfg.alerts.check_interval_minutes}min")
     console.print("Press Ctrl+C to stop\n")
 
     allowed = [cfg.telegram.chat_id] if cfg.telegram.chat_id else None
@@ -875,6 +998,15 @@ def bot_scheduler(args) -> int:
         name="scheduler",
     )
     sched_thread.start()
+
+    # Run alert loop in a daemon thread
+    alert_thread = threading.Thread(
+        target=alert_loop,
+        args=(args,),
+        daemon=True,
+        name="alert-loop",
+    )
+    alert_thread.start()
 
     # Run bot in main thread (catches Ctrl+C)
     try:
@@ -994,6 +1126,15 @@ def main():
         "--dry-run", action="store_true", help="Preview without sending"
     )
     global_onchain_parser.set_defaults(func=global_onchain)
+
+    # Global macro report command
+    macro_parser = subparsers.add_parser(
+        "macro", help="Global macro report (equities, rates, FX, commodities)"
+    )
+    macro_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without sending"
+    )
+    macro_parser.set_defaults(func=macro)
 
     # Watchlist report command
     watchlist_parser = subparsers.add_parser(

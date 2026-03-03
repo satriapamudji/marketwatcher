@@ -68,6 +68,12 @@ class OnchainConfig:
 
 
 @dataclass
+class AlertConfig:
+    """Alert loop configuration."""
+    check_interval_minutes: int = 15
+
+
+@dataclass
 class JobConfig:
     """A scheduled job configuration."""
     id: str = ""
@@ -86,6 +92,8 @@ class JobConfig:
             return "Global Crypto"
         elif self.type == "global_onchain":
             return "Global On-Chain"
+        elif self.type == "macro":
+            return "Global Macro"
         elif self.type == "watchlist":
             return f"Watchlist {self.watchlist_id or 'main'}"
         else:
@@ -114,6 +122,7 @@ class Config:
     report: ReportConfig = field(default_factory=ReportConfig)
     onchain: OnchainConfig = field(default_factory=OnchainConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    alerts: AlertConfig = field(default_factory=AlertConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     database_path: str = "marketwatcher.db"
     log_level: str = "INFO"
@@ -178,6 +187,11 @@ def load_config(config_dir: Path | None = None, env_file: Path | None = None) ->
             for key, value in yaml_config["onchain"].items():
                 if hasattr(config.onchain, key):
                     setattr(config.onchain, key, value)
+
+        if "alerts" in yaml_config:
+            for key, value in yaml_config["alerts"].items():
+                if hasattr(config.alerts, key):
+                    setattr(config.alerts, key, value)
 
         if "logging" in yaml_config:
             for key, value in yaml_config["logging"].items():

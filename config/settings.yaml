@@ -41,6 +41,11 @@ provider:
   rate_limit_calls: 10
   rate_limit_period: 60
 
+# Alert loop configuration
+alerts:
+  # How often to check alert thresholds (minutes)
+  check_interval_minutes: 15
+
 # On-chain filters (GeckoTerminal)
 onchain:
   # Number of pools to fetch from GeckoTerminal before local filtering/deduping

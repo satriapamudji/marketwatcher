@@ -24,6 +24,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "rich>=13.7.0",
     "tenacity>=8.2.0",
+    "yfinance>=0.2.36",
 ]
 
 [project.optional-dependencies]

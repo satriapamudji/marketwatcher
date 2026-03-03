@@ -22,6 +22,80 @@ class Alert:
     threshold: float
     watchlist_id: str
     watchlist_name: str = ""
+    timeframe: str = "24h"
+
+
+def watchlist_has_alerts(watchlist: dict) -> bool:
+    """Check if a watchlist has any alert thresholds configured."""
+    if watchlist.get("alert_pct"):
+        return True
+    for t in watchlist.get("tokens", []):
+        if t.get("alert_above") or t.get("alert_below") or t.get("alert_pct"):
+            return True
+    return False
+
+
+def fetch_alert_prices(
+    watchlist: dict,
+    cg_provider: Any,
+    gt_provider: Any,
+) -> dict[str, Any]:
+    """Lightweight price fetch for alert checking (no full report build).
+
+    CEX tokens: single batch call via /simple/price.
+    DEX tokens: per-token pool fetch (returns 1h/6h/24h changes).
+
+    Returns:
+        Dict matching check_alerts() report_data format: {"tokens": [...]}.
+    """
+    cex_tokens = []
+    dex_tokens = []
+    for t in watchlist.get("tokens", []):
+        token_type = t.get("type", "cex")
+        if token_type == "dex":
+            dex_tokens.append(t)
+        else:
+            cex_tokens.append(t)
+
+    tokens_data: list[dict[str, Any]] = []
+
+    # CEX: batch fetch via /simple/price (1 API call for all)
+    if cex_tokens:
+        coin_ids = [t["coingecko_id"] for t in cex_tokens if t.get("coingecko_id")]
+        prices = cg_provider.get_simple_prices(coin_ids)
+
+        for t in cex_tokens:
+            cg_id = t.get("coingecko_id", "")
+            coin_data = prices.get(cg_id, {})
+            tokens_data.append({
+                "symbol": t.get("symbol", "").upper(),
+                "price_raw": coin_data.get("price", 0),
+                "change_24h_raw": coin_data.get("change_24h"),
+            })
+
+    # DEX: per-token pool fetch (has 1h/6h/24h)
+    for t in dex_tokens:
+        chain = t.get("chain", "")
+        address = t.get("address", "")
+        if not chain or not address:
+            continue
+        try:
+            pools = gt_provider.get_token_pools(chain, address, limit=1)
+            if pools:
+                pool = pools[0]
+                tokens_data.append({
+                    "symbol": t.get("symbol", "").upper(),
+                    "price_raw": pool.price_usd or 0,
+                    "change_24h_raw": pool.price_change_24h,
+                    "change_h6_raw": pool.price_change_h6,
+                    "change_h1_raw": pool.price_change_h1,
+                })
+            else:
+                logger.warning(f"No pool data for {t.get('symbol')} on {chain}")
+        except Exception as e:
+            logger.error(f"Error fetching DEX price for {t.get('symbol')}: {e}")
+
+    return {"tokens": tokens_data}
 
 
 def check_alerts(watchlist: dict, report_data: dict[str, Any]) -> list[Alert]:
@@ -29,7 +103,7 @@ def check_alerts(watchlist: dict, report_data: dict[str, Any]) -> list[Alert]:
 
     Args:
         watchlist: The watchlist dict (with tokens that may have alert_above/below/pct fields)
-        report_data: Output of build_watchlist_report() — has 'tokens' list with price_raw, change_24h_raw
+        report_data: Has 'tokens' list with price_raw, change_24h_raw, and optionally change_h1_raw/change_h6_raw
 
     Returns:
         List of triggered Alert objects.
@@ -80,8 +154,9 @@ def check_alerts(watchlist: dict, report_data: dict[str, Any]) -> list[Alert]:
 
         # Percentage change threshold (per-token overrides watchlist default)
         pct_threshold = cfg.get("alert_pct", wl_default_pct)
-        if pct_threshold is not None and change is not None:
-            if abs(change) >= pct_threshold:
+        if pct_threshold is not None:
+            # Check 24h
+            if change is not None and abs(change) >= pct_threshold:
                 triggered.append(Alert(
                     symbol=symbol,
                     alert_type="pct_change",
@@ -89,6 +164,33 @@ def check_alerts(watchlist: dict, report_data: dict[str, Any]) -> list[Alert]:
                     threshold=pct_threshold,
                     watchlist_id=wl_id,
                     watchlist_name=wl_name,
+                    timeframe="24h",
+                ))
+
+            # Check 6h (DEX tokens only — field absent for CEX)
+            change_h6 = token_data.get("change_h6_raw")
+            if change_h6 is not None and abs(change_h6) >= pct_threshold:
+                triggered.append(Alert(
+                    symbol=symbol,
+                    alert_type="pct_change",
+                    current_value=change_h6,
+                    threshold=pct_threshold,
+                    watchlist_id=wl_id,
+                    watchlist_name=wl_name,
+                    timeframe="6h",
+                ))
+
+            # Check 1h (DEX tokens only)
+            change_h1 = token_data.get("change_h1_raw")
+            if change_h1 is not None and abs(change_h1) >= pct_threshold:
+                triggered.append(Alert(
+                    symbol=symbol,
+                    alert_type="pct_change",
+                    current_value=change_h1,
+                    threshold=pct_threshold,
+                    watchlist_id=wl_id,
+                    watchlist_name=wl_name,
+                    timeframe="1h",
                 ))
 
     if triggered:
@@ -114,7 +216,7 @@ def format_alert(alert: Alert) -> str:
         sign = "+" if alert.current_value >= 0 else ""
         emoji = "\U0001f4c8" if alert.current_value >= 0 else "\U0001f4c9"  # chart up/down
         return (
-            f"{emoji} <b>{alert.symbol}</b> moved {sign}{alert.current_value:.1f}% (24h)\n"
+            f"{emoji} <b>{alert.symbol}</b> moved {sign}{alert.current_value:.1f}% ({alert.timeframe})\n"
             f"Threshold: \u00b1{alert.threshold:.1f}%"
         )
     return f"Alert: {alert.symbol} ({alert.alert_type})"
