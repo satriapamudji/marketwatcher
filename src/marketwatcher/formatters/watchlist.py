@@ -57,7 +57,8 @@ def render_watchlist_fallback(report_data: dict) -> str:
             lines.append(f"<b>╰➤ 7D:</b> {token.get('change_7d', 'N/A')} | "
                          f"<b>{token.get('mcap_label', 'MCAP')}:</b> {token.get('mcap', 'N/A')}")
         else:
-            lines.append(f"\n<b>{sym}:</b> {token.get('change_24h', 'N/A')}")
+            price = token.get('price', 'N/A')
+            lines.append(f"\n<b>{sym}:</b> {price} ({token.get('change_24h', 'N/A')})")
             lines.append(f"<b>╰➤</b> Vol {token.get('volume', 'N/A')} · "
                          f"Liq {token.get('liquidity', 'N/A')} · "
                          f"<b>{token.get('mcap_label', 'FDV')}:</b> {token.get('mcap', 'N/A')}")
