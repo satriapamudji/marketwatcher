@@ -1,0 +1,10 @@
+watchlists:
+- id: main
+  name: Main
+  tokens:
+  - symbol: BTC
+    type: cex
+    coingecko_id: bitcoin
+  - symbol: ETH
+    type: cex
+    coingecko_id: ethereum

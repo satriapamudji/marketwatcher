@@ -64,17 +64,6 @@ def _read_last_run(cfg) -> tuple[str, str]:
         return ("err", "unavailable")
 
 
-def _count_enabled_jobs(cfg) -> tuple[int, int]:
-    """Count enabled vs total jobs."""
-    jobs = [
-        cfg.scheduler.global_crypto.enabled,
-        cfg.scheduler.onchain_solana.enabled,
-        cfg.scheduler.onchain_base.enabled,
-    ]
-    enabled = sum(1 for j in jobs if j)
-    return (enabled, len(jobs))
-
-
 def _schedules_yaml_path(cfg) -> Path:
     return Path(cfg.project_root).resolve() / "config" / "schedules.yaml"
 
@@ -86,13 +75,21 @@ def _write_schedules_yaml(cfg) -> None:
 
     jobs_data = []
     for job in cfg.scheduler.jobs:
-        jobs_data.append({
+        entry: dict = {
             "id": job.id,
             "type": job.type,
             "chain": job.chain,
             "time": job.time,
             "enabled": job.enabled,
-        })
+        }
+        if job.interval_hours > 0:
+            entry["interval_hours"] = job.interval_hours
+            entry["offset_minutes"] = job.offset_minutes
+        if job.chat_id:
+            entry["chat_id"] = job.chat_id
+        if job.watchlist_id:
+            entry["watchlist_id"] = job.watchlist_id
+        jobs_data.append(entry)
 
     payload = {
         "scheduler": {
@@ -107,10 +104,17 @@ def _write_schedules_yaml(cfg) -> None:
 def _generate_job_id(job_type: str, chain: str = "") -> str:
     """Generate a unique job ID."""
     import uuid
+    suffix = uuid.uuid4().hex[:6]
     if job_type == "global":
-        return f"global_{uuid.uuid4().hex[:6]}"
+        return f"global_{suffix}"
+    elif job_type == "global_onchain":
+        return f"global_onchain_{suffix}"
+    elif job_type == "watchlist":
+        return f"watchlist_{suffix}"
+    elif job_type == "alerts":
+        return f"alerts_{suffix}"
     else:
-        return f"onchain_{chain}_{uuid.uuid4().hex[:6]}"
+        return f"onchain_{chain}_{suffix}"
 
 
 def _count_enabled_jobs(cfg) -> tuple[int, int]:
@@ -146,8 +150,10 @@ def _show_home(console: Console, cfg, state: TuiState) -> None:
     menu.add_row("1.", "Doctor", "Check system health")
     menu.add_row("2.", "Global", "Market summary report")
     menu.add_row("3.", "On-Chain", "Chain movers report")
-    menu.add_row("4.", "Scheduler", "Manage scheduled jobs")
-    menu.add_row("5.", "Config", "View settings")
+    menu.add_row("4.", "Global On-Chain", "DeFi TVL overview")
+    menu.add_row("5.", "Watchlist", "Manage & run watchlists")
+    menu.add_row("6.", "Scheduler", "Manage scheduled jobs")
+    menu.add_row("7.", "Config", "View settings")
     menu.add_row("0.", "Quit", "")
 
     console.print(Panel(menu, title="Actions", border_style="cyan"))
@@ -291,6 +297,247 @@ def _run_onchain(console: Console, state: TuiState) -> int:
                        argparse.Namespace(network=chain, dry_run=not send_it))
 
 
+def _run_global_onchain(console: Console, state: TuiState) -> int:
+    """Run global on-chain report with preview/send choice."""
+    send_it = _ask_preview_or_send()
+
+    from marketwatcher.cli import global_onchain
+    action_name = f"Glb On-Chain {'Send' if send_it else 'Preview'}"
+    return _run_action(console, state, action_name, global_onchain,
+                       argparse.Namespace(dry_run=not send_it))
+
+
+def _select_watchlist(console: Console) -> str | None:
+    """Let user pick a watchlist. Returns watchlist_id or None if cancelled."""
+    from marketwatcher.watchlist import list_watchlists
+
+    wls = list_watchlists()
+    if not wls:
+        console.print("  [dim]No watchlists yet[/dim]")
+        return None
+
+    console.print("\n  [bold]Watchlists:[/bold]")
+    for idx, wl in enumerate(wls, 1):
+        console.print(f"    [yellow]{idx}[/yellow]. {wl['name']} [dim]({wl['id']}, {wl['count']} tokens)[/dim]")
+    console.print(f"    [yellow]0[/yellow]. Cancel")
+
+    choices = [str(i) for i in range(len(wls) + 1)]
+    choice = Prompt.ask("Watchlist", choices=choices, default="1")
+    idx = int(choice) - 1
+    if idx < 0 or idx >= len(wls):
+        return None
+    return wls[idx]["id"]
+
+
+def _watchlist_menu(console: Console, cfg, state: TuiState) -> None:
+    """Watchlist management and run menu."""
+    from marketwatcher.watchlist import (
+        add_token, remove_token, get_watchlist,
+        list_watchlists, create_watchlist, delete_watchlist,
+        set_token_alerts, clear_token_alerts, set_watchlist_alerts,
+    )
+
+    active_id = "main"
+
+    while True:
+        console.clear()
+        console.rule("[bold]Watchlist[/bold]")
+
+        # Show all watchlists summary
+        all_wls = list_watchlists()
+        if all_wls:
+            console.print("\n  [bold]Watchlists:[/bold]")
+            for wl in all_wls:
+                marker = " [cyan]<[/cyan]" if wl["id"] == active_id else ""
+                console.print(f"    {wl['name']} [dim]({wl['count']} tokens)[/dim]{marker}")
+        console.print()
+
+        # Show tokens in active watchlist
+        wl = get_watchlist(active_id)
+        tokens = wl.get("tokens", [])
+        console.print(f"  [bold]{wl.get('name', active_id)}[/bold] ({len(tokens)} tokens)")
+        if tokens:
+            for t in tokens:
+                sym = t.get("symbol", "???")
+                # Alert indicator
+                has_alert = any(k in t for k in ("alert_above", "alert_below", "alert_pct"))
+                alert_tag = " [yellow]![/yellow]" if has_alert else ""
+                if t.get("type") == "dex":
+                    console.print(f"    {sym}{alert_tag} [dim](DEX: {t.get('chain', '?')}/{t.get('address', '?')[:10]}...)[/dim]")
+                else:
+                    console.print(f"    {sym}{alert_tag} [dim](CEX: {t.get('coingecko_id', '?')})[/dim]")
+        else:
+            console.print("    [dim]No tokens yet[/dim]")
+        console.print()
+
+        menu = Table(show_header=False, box=None, pad_edge=False)
+        menu.add_column(style="bold yellow", width=4)
+        menu.add_column()
+        menu.add_row("1.", "Add token")
+        menu.add_row("2.", "Remove token")
+        menu.add_row("3.", "Run watchlist report")
+        menu.add_row("4.", "Switch watchlist")
+        menu.add_row("5.", "New watchlist")
+        menu.add_row("6.", "Delete watchlist")
+        menu.add_row("7.", "Set token alert")
+        menu.add_row("8.", "Watchlist alert defaults")
+        menu.add_row("0.", "Back")
+        console.print(Panel(menu, border_style="cyan"))
+
+        choice = Prompt.ask("Option", choices=["0", "1", "2", "3", "4", "5", "6", "7", "8"], default="0")
+
+        if choice == "0":
+            return
+        elif choice == "1":
+            console.print("\n  [bold]Token type:[/bold]")
+            console.print("    [yellow]1[/yellow]. CEX (CoinGecko-listed)")
+            console.print("    [yellow]2[/yellow]. DEX (on-chain by contract)")
+            t_choice = Prompt.ask("Type", choices=["1", "2"], default="1")
+
+            symbol = Prompt.ask("Symbol (e.g. BTC)").strip().upper()
+            if not symbol:
+                continue
+
+            if t_choice == "1":
+                cg_id = Prompt.ask("CoinGecko ID (e.g. bitcoin)").strip().lower()
+                if cg_id:
+                    ok = add_token(active_id, symbol, token_type="cex", coingecko_id=cg_id)
+                    if ok:
+                        state.push("Add Token", "OK", symbol)
+                        console.print(f"[green]Added {symbol}[/green]")
+                    else:
+                        console.print(f"[yellow]{symbol} already exists[/yellow]")
+            else:
+                chain = _select_chain(console)
+                address = Prompt.ask("Contract address").strip()
+                if address:
+                    ok = add_token(active_id, symbol, token_type="dex", chain=chain, address=address)
+                    if ok:
+                        state.push("Add Token", "OK", symbol)
+                        console.print(f"[green]Added {symbol}[/green]")
+                    else:
+                        console.print(f"[yellow]{symbol} already exists[/yellow]")
+
+        elif choice == "2":
+            if not tokens:
+                console.print("[yellow]No tokens to remove[/yellow]")
+            else:
+                symbol = Prompt.ask("Symbol to remove").strip().upper()
+                if symbol:
+                    ok = remove_token(active_id, symbol)
+                    if ok:
+                        state.push("Remove Token", "OK", symbol)
+                        console.print(f"[green]Removed {symbol}[/green]")
+                    else:
+                        console.print(f"[yellow]{symbol} not found[/yellow]")
+
+        elif choice == "3":
+            send_it = _ask_preview_or_send()
+            from marketwatcher.cli import watchlist_cmd
+            action_name = f"Watchlist {'Send' if send_it else 'Preview'}"
+            _run_action(console, state, action_name, watchlist_cmd,
+                        argparse.Namespace(dry_run=not send_it, watchlist_id=active_id))
+
+        elif choice == "4":
+            picked = _select_watchlist(console)
+            if picked:
+                active_id = picked
+                state.push("Switch WL", "OK", active_id)
+                continue  # Skip "Press Enter" — redraw immediately
+
+        elif choice == "5":
+            new_id = Prompt.ask("Watchlist ID (e.g. defi, memes)").strip().lower()
+            if new_id:
+                new_name = Prompt.ask("Display name", default=new_id.title()).strip()
+                ok = create_watchlist(new_id, new_name)
+                if ok:
+                    active_id = new_id
+                    state.push("New WL", "OK", new_id)
+                    console.print(f"[green]Created {new_name}[/green]")
+                else:
+                    console.print(f"[yellow]{new_id} already exists[/yellow]")
+
+        elif choice == "6":
+            if active_id == "main" and len(all_wls) <= 1:
+                console.print("[yellow]Cannot delete the only watchlist[/yellow]")
+            else:
+                target = _select_watchlist(console)
+                if target:
+                    confirm = Prompt.ask(f"Delete '{target}'?", choices=["y", "n"], default="n")
+                    if confirm == "y":
+                        delete_watchlist(target)
+                        state.push("Del WL", "OK", target)
+                        console.print(f"[green]Deleted {target}[/green]")
+                        if active_id == target:
+                            remaining = list_watchlists()
+                            active_id = remaining[0]["id"] if remaining else "main"
+
+        elif choice == "7":
+            if not tokens:
+                console.print("[yellow]No tokens to set alerts on[/yellow]")
+            else:
+                console.print("\n  [bold]Select token:[/bold]")
+                for idx, t in enumerate(tokens, 1):
+                    sym = t.get("symbol", "???")
+                    alerts_info = []
+                    if "alert_above" in t:
+                        alerts_info.append(f"above ${t['alert_above']:,.0f}")
+                    if "alert_below" in t:
+                        alerts_info.append(f"below ${t['alert_below']:,.0f}")
+                    if "alert_pct" in t:
+                        alerts_info.append(f"pct {t['alert_pct']}%")
+                    info = f" [yellow]({', '.join(alerts_info)})[/yellow]" if alerts_info else ""
+                    console.print(f"    [yellow]{idx}[/yellow]. {sym}{info}")
+
+                t_choices = [str(i) for i in range(1, len(tokens) + 1)]
+                t_pick = Prompt.ask("Token #", choices=t_choices, default="1")
+                token = tokens[int(t_pick) - 1]
+                sym = token.get("symbol", "???")
+
+                console.print(f"\n  Setting alerts for [bold]{sym}[/bold]")
+                console.print("  Leave blank to skip, 'off' to remove")
+
+                above_input = Prompt.ask("  Price above (USD)", default="").strip()
+                below_input = Prompt.ask("  Price below (USD)", default="").strip()
+                pct_input = Prompt.ask("  Change % threshold", default="").strip()
+
+                if above_input.lower() == "off" or below_input.lower() == "off" or pct_input.lower() == "off":
+                    clear_token_alerts(active_id, sym)
+                    state.push("Clear Alert", "OK", sym)
+                    console.print(f"[green]Cleared alerts for {sym}[/green]")
+                else:
+                    a_above = float(above_input) if above_input else None
+                    a_below = float(below_input) if below_input else None
+                    a_pct = float(pct_input) if pct_input else None
+                    if a_above is not None or a_below is not None or a_pct is not None:
+                        set_token_alerts(active_id, sym, alert_above=a_above, alert_below=a_below, alert_pct=a_pct)
+                        state.push("Set Alert", "OK", sym)
+                        console.print(f"[green]Alerts updated for {sym}[/green]")
+                    else:
+                        console.print("[dim]No changes[/dim]")
+
+        elif choice == "8":
+            console.print(f"\n  [bold]Watchlist alert defaults for '{active_id}'[/bold]")
+            current_pct = wl.get("alert_pct", "not set")
+            current_chat = wl.get("alert_chat_id", "default")
+            console.print(f"  Current: pct={current_pct}, channel={current_chat}")
+
+            pct_input = Prompt.ask("  Default pct threshold (blank to skip)", default="").strip()
+            chat_input = Prompt.ask("  Alert chat_id (blank to skip, 'off' to remove)", default="").strip()
+
+            wl_pct = float(pct_input) if pct_input else None
+            wl_chat = "" if chat_input.lower() == "off" else (chat_input if chat_input else None)
+
+            if wl_pct is not None or wl_chat is not None:
+                set_watchlist_alerts(active_id, alert_pct=wl_pct, alert_chat_id=wl_chat)
+                state.push("WL Alerts", "OK", active_id)
+                console.print("[green]Watchlist alert defaults updated[/green]")
+            else:
+                console.print("[dim]No changes[/dim]")
+
+        Prompt.ask("\n[dim]Press Enter[/dim]", default="")
+
+
 def _show_jobs_table(console: Console, cfg) -> None:
     """Display scheduled jobs."""
     if not cfg.scheduler.jobs:
@@ -300,15 +547,26 @@ def _show_jobs_table(console: Console, cfg) -> None:
     table = Table(show_header=True, header_style="bold")
     table.add_column("#", style="dim", width=3)
     table.add_column("Job")
-    table.add_column("Type", width=10)
-    table.add_column("Time", width=8)
+    table.add_column("Type", width=12)
+    table.add_column("Schedule", width=14)
+    table.add_column("Channel", width=14)
     table.add_column("Status", width=6)
 
     for idx, job in enumerate(cfg.scheduler.jobs, 1):
         status = "[green]ON[/green]" if job.enabled else "[dim]OFF[/dim]"
-        job_type = "Global" if job.type == "global" else f"On-Chain"
+        if job.type == "global":
+            job_type = "Global"
+        elif job.type == "global_onchain":
+            job_type = "Glb On-Chain"
+        elif job.type == "watchlist":
+            job_type = "Watchlist"
+        elif job.type == "alerts":
+            job_type = "Alerts"
+        else:
+            job_type = "On-Chain"
         name = job.display_name()
-        table.add_row(str(idx), name, job_type, job.time or "--:--", status)
+        channel = job.chat_id[-6:] if job.chat_id else "[dim]default[/dim]"
+        table.add_row(str(idx), name, job_type, job.schedule_display(), channel, status)
 
     console.print(table)
 
@@ -320,20 +578,55 @@ def _add_job(console: Console, cfg, state: TuiState):
     console.print("\n  [bold]Job type:[/bold]")
     console.print("    [yellow]1[/yellow]. Global (market summary)")
     console.print("    [yellow]2[/yellow]. On-Chain (chain movers)")
+    console.print("    [yellow]3[/yellow]. Global On-Chain (DeFi TVL overview)")
+    console.print("    [yellow]4[/yellow]. Watchlist (tracked tokens)")
+    console.print("    [yellow]5[/yellow]. Alerts (watchlist price/pct alerts)")
     console.print("    [yellow]0[/yellow]. Cancel")
 
-    choice = Prompt.ask("Type", choices=["0", "1", "2"], default="1")
+    choice = Prompt.ask("Type", choices=["0", "1", "2", "3", "4", "5"], default="1")
 
     if choice == "0":
         return cfg
 
-    job_type = "global" if choice == "1" else "onchain"
+    if choice == "1":
+        job_type = "global"
+    elif choice == "3":
+        job_type = "global_onchain"
+    elif choice == "4":
+        job_type = "watchlist"
+    elif choice == "5":
+        job_type = "alerts"
+    else:
+        job_type = "onchain"
     chain = ""
+    watchlist_id = ""
 
     if job_type == "onchain":
         chain = _select_chain(console)
+    elif job_type in ("watchlist", "alerts"):
+        watchlist_id = Prompt.ask("Watchlist ID", default="main").strip()
 
-    time_input = Prompt.ask("Time (HH:MM)", default="09:00").strip()
+    # Ask for schedule mode
+    console.print("\n  [bold]Schedule mode:[/bold]")
+    console.print("    [yellow]1[/yellow]. Daily at specific time")
+    console.print("    [yellow]2[/yellow]. Every N hours (interval)")
+    sched_choice = Prompt.ask("Mode", choices=["1", "2"], default="1")
+
+    time_input = "09:00"
+    interval_hours = 0
+    offset_minutes = 0
+
+    if sched_choice == "2":
+        interval_input = Prompt.ask("Interval (hours)", default="4").strip()
+        interval_hours = int(interval_input)
+        offset_input = Prompt.ask("Offset (minutes, to stagger jobs)", default="0").strip()
+        offset_minutes = int(offset_input)
+        time_input = ""
+    else:
+        time_input = Prompt.ask("Time (HH:MM)", default="09:00").strip()
+
+    # Optional channel override
+    chat_id = Prompt.ask("Chat ID (blank for default)", default="").strip()
 
     # Create job
     job = JobConfig(
@@ -342,13 +635,17 @@ def _add_job(console: Console, cfg, state: TuiState):
         chain=chain,
         time=time_input,
         enabled=True,
+        interval_hours=interval_hours,
+        offset_minutes=offset_minutes,
+        chat_id=chat_id,
+        watchlist_id=watchlist_id,
     )
 
     cfg.scheduler.jobs.append(job)
     _write_schedules_yaml(cfg)
     new_cfg = config.reload_config()
     state.push("Add Job", "OK", job.display_name())
-    console.print(f"[green]Added:[/green] {job.display_name()} at {time_input}")
+    console.print(f"[green]Added:[/green] {job.display_name()} ({job.schedule_display()})")
     return new_cfg
 
 
@@ -369,19 +666,47 @@ def _select_job_index(console: Console, cfg, prompt_text: str = "Job #") -> int:
 
 
 def _edit_job(console: Console, cfg, state: TuiState):
-    """Edit a job's time."""
+    """Edit a job's schedule, chat_id, and watchlist_id."""
     idx = _select_job_index(console, cfg, "Job # to edit (0 to cancel)")
     if idx < 0:
         return cfg
 
     job = cfg.scheduler.jobs[idx]
-    new_time = Prompt.ask(f"New time for {job.display_name()}", default=job.time or "09:00").strip()
-    job.time = new_time
+    console.print(f"\n  Editing: [bold]{job.display_name()}[/bold] (current: {job.schedule_display()})")
+
+    # Schedule
+    console.print("\n  [bold]Schedule mode:[/bold]")
+    console.print("    [yellow]1[/yellow]. Daily at specific time")
+    console.print("    [yellow]2[/yellow]. Every N hours (interval)")
+    default_mode = "2" if job.interval_hours > 0 else "1"
+    sched_choice = Prompt.ask("Mode", choices=["1", "2"], default=default_mode)
+
+    if sched_choice == "2":
+        interval_input = Prompt.ask("Interval (hours)", default=str(job.interval_hours or 4)).strip()
+        job.interval_hours = int(interval_input)
+        offset_input = Prompt.ask("Offset (minutes)", default=str(job.offset_minutes)).strip()
+        job.offset_minutes = int(offset_input)
+        job.time = ""
+    else:
+        new_time = Prompt.ask("Time (HH:MM)", default=job.time or "09:00").strip()
+        job.time = new_time
+        job.interval_hours = 0
+        job.offset_minutes = 0
+
+    # Chat ID
+    current_chat = job.chat_id or "(default)"
+    new_chat = Prompt.ask(f"Chat ID [dim]current: {current_chat}[/dim]", default=job.chat_id or "").strip()
+    job.chat_id = new_chat
+
+    # Watchlist ID (only for watchlist jobs)
+    if job.type == "watchlist":
+        new_wl = Prompt.ask("Watchlist ID", default=job.watchlist_id or "main").strip()
+        job.watchlist_id = new_wl
 
     _write_schedules_yaml(cfg)
     new_cfg = config.reload_config()
-    state.push("Edit Job", "OK", f"{job.display_name()}@{new_time}")
-    console.print(f"[green]Updated:[/green] {job.display_name()} now at {new_time}")
+    state.push("Edit Job", "OK", f"{job.display_name()} {job.schedule_display()}")
+    console.print(f"[green]Updated:[/green] {job.display_name()} ({job.schedule_display()})")
     return new_cfg
 
 
@@ -443,7 +768,7 @@ def _scheduler_menu(console: Console, cfg, state: TuiState):
         menu.add_column(style="bold yellow", width=4)
         menu.add_column()
         menu.add_row("1.", "Add job")
-        menu.add_row("2.", "Edit time")
+        menu.add_row("2.", "Edit schedule")
         menu.add_row("3.", "Toggle on/off")
         menu.add_row("4.", "Delete job")
         menu.add_row("5.", "Run scheduler")
@@ -505,7 +830,7 @@ def _show_config(console: Console, cfg) -> None:
     if cfg.scheduler.jobs:
         for job in cfg.scheduler.jobs:
             status = "[green]ON[/green]" if job.enabled else "[dim]OFF[/dim]"
-            console.print(f"  {job.display_name()}: {job.time} {status}")
+            console.print(f"  {job.display_name()}: {job.schedule_display()} {status}")
     else:
         console.print("  [dim]No jobs configured[/dim]")
 
@@ -547,7 +872,7 @@ def run_tui() -> int:
 
     while True:
         _show_home(console, cfg, state)
-        choice = Prompt.ask("\nSelect", choices=["0", "1", "2", "3", "4", "5"], default="0")
+        choice = Prompt.ask("\nSelect", choices=["0", "1", "2", "3", "4", "5", "6", "7"], default="0")
 
         if choice == "0":
             console.print("[yellow]Bye[/yellow]")
@@ -559,11 +884,15 @@ def run_tui() -> int:
         elif choice == "3":
             _run_onchain(console, state)
         elif choice == "4":
-            cfg = _scheduler_menu(console, cfg, state)
+            _run_global_onchain(console, state)
         elif choice == "5":
+            _watchlist_menu(console, cfg, state)
+        elif choice == "6":
+            cfg = _scheduler_menu(console, cfg, state)
+        elif choice == "7":
             cfg = _config_menu(console, cfg, state)
 
-        if choice not in ["0", "4"]:
+        if choice not in ["0", "5", "6"]:
             Prompt.ask("\n[dim]Press Enter[/dim]", default="")
 
 

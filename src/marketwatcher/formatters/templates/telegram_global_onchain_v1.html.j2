@@ -1,0 +1,24 @@
+<i>{{ timestamp.strftime(config.timestamp_format) }}</i>
+<b><u>Global On-Chain</u></b>
+{{ divider_line }}
+
+<b>Total DeFi TVL:</b> {{ total_tvl }}
+<b>╰➤ 1D:</b> {{ tvl_1d }} | <b>7D:</b> {{ tvl_7d }} | <b>14D:</b> {{ tvl_14d }}
+
+<b>24h DEX Volume:</b> {{ dex_volume_24h }}
+<b>╰➤ 1D:</b> {{ dex_change_1d }} | <b>7D:</b> {{ dex_change_7d }}
+
+<b>Stablecoin Supply:</b> {{ stablecoin_supply }}
+
+{{ divider_line }}
+
+<b>TVL by Chain:</b>
+{% for chain in top_chains %}• {{ chain.name }}: {{ chain.tvl }} ({{ chain.dominance }})
+{% endfor %}
+{% if tvl_gainers %}<b>TVL Gainers (7D):</b>
+{% for chain in tvl_gainers %}• {{ chain.name }}: {{ chain.change }}
+{% endfor %}{% endif %}
+{% if tvl_losers %}<b>TVL Losers (7D):</b>
+{% for chain in tvl_losers %}• {{ chain.name }}: {{ chain.change }}
+{% endfor %}{% endif %}
+{{ divider_line }}

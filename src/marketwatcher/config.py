@@ -71,17 +71,34 @@ class OnchainConfig:
 class JobConfig:
     """A scheduled job configuration."""
     id: str = ""
-    type: str = "global"  # "global" or "onchain"
+    type: str = "global"  # "global", "onchain", "global_onchain", or "watchlist"
     chain: str = ""  # Only for onchain type
-    time: str = "09:00"  # HH:MM
+    time: str = "09:00"  # HH:MM (used when interval_hours is 0)
     enabled: bool = True
+    interval_hours: int = 0  # 0 = daily at time, >0 = every N hours
+    offset_minutes: int = 0  # Stagger offset for interval jobs
+    chat_id: str = ""  # Override channel (empty = use global default)
+    watchlist_id: str = ""  # Only for watchlist type
 
     def display_name(self) -> str:
         """Get human-readable name."""
         if self.type == "global":
             return "Global Crypto"
+        elif self.type == "global_onchain":
+            return "Global On-Chain"
+        elif self.type == "watchlist":
+            return f"Watchlist {self.watchlist_id or 'main'}"
         else:
             return f"On-Chain {self.chain.upper()}" if self.chain else "On-Chain"
+
+    def schedule_display(self) -> str:
+        """Get human-readable schedule string."""
+        if self.interval_hours > 0:
+            s = f"Every {self.interval_hours}h"
+            if self.offset_minutes > 0:
+                s += f" +{self.offset_minutes}m"
+            return s
+        return self.time or "--:--"
 
 
 @dataclass
@@ -183,6 +200,10 @@ def load_config(config_dir: Path | None = None, env_file: Path | None = None) ->
                         chain=job_data.get("chain", ""),
                         time=str(job_data.get("time", "09:00")),
                         enabled=bool(job_data.get("enabled", True)),
+                        interval_hours=int(job_data.get("interval_hours", 0)),
+                        offset_minutes=int(job_data.get("offset_minutes", 0)),
+                        chat_id=str(job_data.get("chat_id", "")),
+                        watchlist_id=str(job_data.get("watchlist_id", "")),
                     )
                     if job.id:
                         config.scheduler.jobs.append(job)

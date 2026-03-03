@@ -174,6 +174,34 @@ class CoinGeckoProvider:
         logger.info(f"Found {len(categories)} categories with market data")
         return categories
 
+    def get_coin(self, coin_id: str) -> dict[str, Any]:
+        """Fetch single coin data: price, mcap, 24h/7d changes.
+
+        Args:
+            coin_id: CoinGecko coin ID (e.g. "bitcoin", "ethereum")
+
+        Returns:
+            Dict with symbol, name, price, mcap, change_24h, change_7d
+        """
+        logger.info(f"Fetching coin data for {coin_id}")
+        data = self._request(f"/coins/{coin_id}", params={
+            "localization": "false",
+            "tickers": "false",
+            "community_data": "false",
+            "developer_data": "false",
+        })
+
+        market = data.get("market_data", {})
+        return {
+            "symbol": data.get("symbol", "").upper(),
+            "name": data.get("name", ""),
+            "price": market.get("current_price", {}).get("usd", 0),
+            "mcap": market.get("market_cap", {}).get("usd", 0),
+            "change_24h": market.get("price_change_percentage_24h"),
+            "change_7d": market.get("price_change_percentage_7d"),
+            "change_14d": market.get("price_change_percentage_14d"),
+        }
+
     def close(self) -> None:
         """Close HTTP client."""
         if self._client is not None:

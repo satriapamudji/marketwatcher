@@ -1,0 +1,10 @@
+<i>{{ timestamp.strftime(config.timestamp_format) }}</i>
+<b><u>Watchlist: {{ watchlist_name }}</u></b>
+{{ divider_line }}
+{% for token in tokens %}
+{% if token.type == 'cex' %}<b>{{ token.symbol }}:</b> {{ token.price }} ({{ token.change_24h }})
+<b>╰➤ 7D:</b> {{ token.change_7d }} | <b>{{ token.mcap_label }}:</b> {{ token.mcap }}
+{% else %}<b>{{ token.symbol }}:</b> {{ token.change_24h }}
+<b>╰➤</b> Vol {{ token.volume | default('N/A') }} · Liq {{ token.liquidity | default('N/A') }} · <b>{{ token.mcap_label }}:</b> {{ token.mcap }}
+{% endif %}{% endfor %}
+{{ divider_line }}

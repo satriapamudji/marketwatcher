@@ -68,7 +68,10 @@ def _render_section_lines(network: str, title: str, rows: list[dict]) -> list[st
 def render_onchain_fallback(report_data: dict, divider_line: str = "--------------------------------") -> str:
     """Fallback renderer if Jinja template fails."""
     network = escape_html(report_data.get("network", ""))
-    lines: list[str] = ["<b>On-Chain</b>", divider_line]
+    network_name = escape_html(report_data.get("network_name", network))
+    ts = report_data.get("timestamp")
+    ts_line = f"<i>{ts.strftime('%Y-%m-%d %H:%M UTC')}</i>" if ts else ""
+    lines: list[str] = [ts_line, f"<b><u>On-Chain: {network_name}</u></b>", divider_line]
 
     gainers = report_data.get("top_gainers", [])
     losers = report_data.get("top_losers", [])

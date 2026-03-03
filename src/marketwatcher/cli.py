@@ -31,6 +31,12 @@ def _console_safe_preview(text: str) -> str:
         return text
 
 
+def _get_chat_id(cfg, args=None) -> str:
+    """Get the target chat ID, preferring per-job override over global default."""
+    override = getattr(args, "chat_id", "") if args else ""
+    return override or cfg.telegram.chat_id
+
+
 def doctor(args) -> int:
     """Validate configuration and connectivity."""
     import sys
@@ -281,7 +287,8 @@ def send(args) -> int:
             console.print("\n[bold]Message:[/bold]\n")
             console.print(message)
         else:
-            result = publisher.send_message(cfg.telegram.chat_id, message)
+            chat_id = _get_chat_id(cfg, args)
+            result = publisher.send_message(chat_id, message)
             console.print(f"[green]OK[/green] Message sent! Message ID: {result.message_id}")
 
         return 0
@@ -368,6 +375,24 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
     return hour, minute
 
 
+def _next_interval_run(now: 'datetime', interval_hours: int, offset_minutes: int) -> 'datetime':
+    """Calculate the next run time for an interval-based job.
+
+    Slots are aligned to midnight UTC + offset, repeating every interval_hours.
+    E.g. interval=4, offset=10 → 00:10, 04:10, 08:10, 12:10, 16:10, 20:10
+    """
+    from datetime import timedelta
+
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    slot_start = midnight + timedelta(minutes=offset_minutes)
+
+    # Find the next slot after now
+    while slot_start <= now:
+        slot_start += timedelta(hours=interval_hours)
+
+    return slot_start
+
+
 def scheduler(args) -> int:
     """Run multi-job scheduler using config/schedules.yaml."""
     import argparse
@@ -385,8 +410,11 @@ def scheduler(args) -> int:
         try:
             cfg = config.reload_config()
 
-            # Get enabled jobs from new format
-            enabled_jobs = [j for j in cfg.scheduler.jobs if j.enabled and j.time]
+            # Get enabled jobs (interval jobs don't need a time field)
+            enabled_jobs = [
+                j for j in cfg.scheduler.jobs
+                if j.enabled and (j.interval_hours > 0 or j.time)
+            ]
 
             if not enabled_jobs:
                 console.print("[yellow]No enabled jobs. Sleeping 60s...[/yellow]")
@@ -397,16 +425,22 @@ def scheduler(args) -> int:
             next_runs: list[tuple[datetime, object]] = []
 
             for job in enabled_jobs:
-                try:
-                    hh, mm = _parse_hhmm(job.time)
-                except Exception as exc:
-                    logger.error(f"Invalid time for {job.id}: {job.time} ({exc})")
-                    continue
+                if job.interval_hours > 0:
+                    # Interval-based scheduling
+                    target = _next_interval_run(now, job.interval_hours, job.offset_minutes)
+                    next_runs.append((target, job))
+                else:
+                    # Daily time-based scheduling
+                    try:
+                        hh, mm = _parse_hhmm(job.time)
+                    except Exception as exc:
+                        logger.error(f"Invalid time for {job.id}: {job.time} ({exc})")
+                        continue
 
-                target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if target <= now:
-                    target += timedelta(days=1)
-                next_runs.append((target, job))
+                    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if target <= now:
+                        target += timedelta(days=1)
+                    next_runs.append((target, job))
 
             if not next_runs:
                 console.print("[yellow]No valid enabled jobs. Sleeping 60s...[/yellow]")
@@ -417,6 +451,7 @@ def scheduler(args) -> int:
             wait_seconds = max(0.0, (target_time - now).total_seconds())
             console.print(
                 f"[dim]Next:[/dim] {job.display_name()} at {target_time:%H:%M} "
+                f"({job.schedule_display()}) "
                 f"[dim]in {wait_seconds/60:.0f} min[/dim]"
             )
             time.sleep(wait_seconds)
@@ -426,9 +461,24 @@ def scheduler(args) -> int:
             console.print(f"[bold cyan]Running:[/bold cyan] {job.display_name()}")
 
             if job.type == "global":
-                rc = run(argparse.Namespace(dry_run=False, schedule=None))
+                rc = run(argparse.Namespace(dry_run=False, schedule=None, chat_id=job.chat_id))
             elif job.type == "onchain":
-                rc = onchain(argparse.Namespace(network=job.chain, dry_run=False))
+                rc = onchain(argparse.Namespace(network=job.chain, dry_run=False, chat_id=job.chat_id))
+            elif job.type == "global_onchain":
+                rc = global_onchain(argparse.Namespace(dry_run=False, chat_id=job.chat_id))
+            elif job.type == "watchlist":
+                rc = watchlist_cmd(argparse.Namespace(
+                    dry_run=False,
+                    watchlist_id=job.watchlist_id or "main",
+                    chat_id=job.chat_id,
+                    check_alerts=True,
+                ))
+            elif job.type == "alerts":
+                rc = alerts_cmd(argparse.Namespace(
+                    dry_run=False,
+                    watchlist_id=job.watchlist_id or "main",
+                    chat_id=job.chat_id,
+                ))
             else:
                 logger.error(f"Unknown job type: {job.type}")
                 rc = 1
@@ -483,7 +533,7 @@ def onchain(args) -> int:
 
         # Send
         publisher = TelegramPublisher(cfg.telegram.bot_token)
-        result = publisher.send_message(cfg.telegram.chat_id, message)
+        result = publisher.send_message(_get_chat_id(cfg, args), message)
         console.print(f"[green]OK[/green] Message sent! Message ID: {result.message_id}")
         return 0
 
@@ -491,6 +541,172 @@ def onchain(args) -> int:
         logger.error(f"On-chain fetch failed: {e}")
         console.print(f"\n[bold red]Error:[/bold red] {e}")
         return 1
+
+
+def global_onchain(args) -> int:
+    """Fetch and send global on-chain DeFi overview from DefiLlama."""
+    from marketwatcher.logging_config import get_logger
+
+    logger = get_logger("cli")
+
+    cfg = config.get_config()
+    console.print("[bold]Fetching global on-chain data from DefiLlama...[/bold]")
+
+    try:
+        from marketwatcher.providers.defillama import DefiLlamaProvider
+        from marketwatcher.reports.global_onchain import build_global_onchain_report
+        from marketwatcher.formatters.global_onchain import render_global_onchain_report
+        from marketwatcher.publishers.telegram import TelegramPublisher
+
+        provider = DefiLlamaProvider(
+            cache_ttl=cfg.provider.cache_ttl,
+            timeout=cfg.provider.timeout,
+        )
+        report_data = build_global_onchain_report(provider, cfg.report)
+        provider.close()
+
+        message = render_global_onchain_report(report_data, cfg.report)
+
+        if args.dry_run:
+            console.print("[yellow]Dry-run mode - not sending[/yellow]")
+            console.print("\n[bold]Message:[/bold]\n")
+            console.print(_console_safe_preview(message))
+            return 0
+
+        publisher = TelegramPublisher(cfg.telegram.bot_token)
+        result = publisher.send_message(_get_chat_id(cfg, args), message)
+        console.print(f"[green]OK[/green] Message sent! Message ID: {result.message_id}")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Global on-chain fetch failed: {e}")
+        console.print(f"\n[bold red]Error:[/bold red] {e}")
+        return 1
+
+
+def watchlist_cmd(args) -> int:
+    """Fetch and send watchlist report."""
+    from marketwatcher.logging_config import get_logger
+
+    logger = get_logger("cli")
+    watchlist_id = getattr(args, "watchlist_id", "main")
+
+    cfg = config.get_config()
+    console.print(f"[bold]Fetching watchlist '{watchlist_id}'...[/bold]")
+
+    try:
+        from marketwatcher.watchlist import get_watchlist
+        from marketwatcher.providers.coingecko import CoinGeckoProvider
+        from marketwatcher.providers.geckoterminal import GeckoTerminalProvider
+        from marketwatcher.reports.watchlist import build_watchlist_report
+        from marketwatcher.formatters.watchlist import render_watchlist_report
+        from marketwatcher.publishers.telegram import TelegramPublisher
+
+        wl = get_watchlist(watchlist_id)
+        if not wl.get("tokens"):
+            console.print("[yellow]Watchlist is empty. Add tokens first.[/yellow]")
+            return 0
+
+        cg = CoinGeckoProvider(cache_ttl=cfg.provider.cache_ttl, timeout=cfg.provider.timeout,
+                               retry_count=cfg.provider.retry_count, backoff_factor=cfg.provider.backoff_factor)
+        gt = GeckoTerminalProvider(cache_ttl=cfg.provider.cache_ttl, timeout=cfg.provider.timeout)
+
+        report_data = build_watchlist_report(wl, cg, gt, cfg.report)
+        cg.close()
+        gt.close()
+
+        message = render_watchlist_report(report_data, cfg.report)
+
+        if args.dry_run:
+            console.print("[yellow]Dry-run mode - not sending[/yellow]")
+            console.print("\n[bold]Message:[/bold]\n")
+            console.print(_console_safe_preview(message))
+            return 0
+
+        publisher = TelegramPublisher(cfg.telegram.bot_token)
+        result = publisher.send_message(_get_chat_id(cfg, args), message)
+        console.print(f"[green]OK[/green] Message sent! Message ID: {result.message_id}")
+
+        # Piggyback alert check
+        if getattr(args, "check_alerts", False):
+            from marketwatcher.alerts import check_alerts, format_alerts_batch
+            triggered = check_alerts(wl, report_data)
+            if triggered:
+                alert_msg = format_alerts_batch(triggered)
+                alert_chat_id = wl.get("alert_chat_id") or _get_chat_id(cfg, args)
+                publisher.send_message(alert_chat_id, alert_msg)
+                console.print(f"[yellow]{len(triggered)} alert(s) sent![/yellow]")
+
+        return 0
+
+    except Exception as e:
+        logger.error(f"Watchlist report failed: {e}")
+        console.print(f"\n[bold red]Error:[/bold red] {e}")
+        return 1
+
+
+def watchlist_manage(args) -> int:
+    """Manage watchlist tokens (add/remove/list)."""
+    from marketwatcher.watchlist import add_token, remove_token, get_watchlist, list_watchlists
+
+    action = args.action
+    watchlist_id = getattr(args, "watchlist_id", "main")
+
+    if action == "list":
+        wl = get_watchlist(watchlist_id)
+        console.print(f"\n[bold]Watchlist: {wl.get('name', watchlist_id)}[/bold]")
+        tokens = wl.get("tokens", [])
+        if not tokens:
+            console.print("  [dim]No tokens[/dim]")
+        else:
+            for t in tokens:
+                sym = t.get("symbol", "???")
+                if t.get("type") == "dex":
+                    console.print(f"  {sym} [dim](DEX: {t.get('chain', '?')}/{t.get('address', '?')[:10]}...)[/dim]")
+                else:
+                    console.print(f"  {sym} [dim](CEX: {t.get('coingecko_id', '?')})[/dim]")
+        return 0
+
+    elif action == "add":
+        symbol = getattr(args, "symbol", None)
+        if not symbol:
+            console.print("[red]--symbol is required[/red]")
+            return 1
+
+        cg_id = getattr(args, "coingecko_id", "") or ""
+        chain = getattr(args, "chain", "") or ""
+        address = getattr(args, "address", "") or ""
+
+        if chain and address:
+            token_type = "dex"
+        elif cg_id:
+            token_type = "cex"
+        else:
+            console.print("[red]Provide --coingecko-id (CEX) or --chain + --address (DEX)[/red]")
+            return 1
+
+        ok = add_token(watchlist_id, symbol, token_type=token_type,
+                       coingecko_id=cg_id, chain=chain, address=address)
+        if ok:
+            console.print(f"[green]Added {symbol} to {watchlist_id}[/green]")
+        else:
+            console.print(f"[yellow]{symbol} already in {watchlist_id}[/yellow]")
+        return 0
+
+    elif action == "remove":
+        symbol = getattr(args, "symbol", None)
+        if not symbol:
+            console.print("[red]--symbol is required[/red]")
+            return 1
+
+        ok = remove_token(watchlist_id, symbol)
+        if ok:
+            console.print(f"[green]Removed {symbol} from {watchlist_id}[/green]")
+        else:
+            console.print(f"[yellow]{symbol} not found in {watchlist_id}[/yellow]")
+        return 0
+
+    return 0
 
 
 def chains(args) -> int:
@@ -548,6 +764,133 @@ def chains(args) -> int:
     console.print("\nUse [bold]marketwatcher chains --search <query>[/bold] to find more")
     console.print("Use [bold]marketwatcher chains --refresh[/bold] to update")
 
+    return 0
+
+
+def alerts_cmd(args) -> int:
+    """Check watchlist alerts and send triggered ones."""
+    from marketwatcher.logging_config import get_logger
+
+    logger = get_logger("cli")
+    watchlist_id = getattr(args, "watchlist_id", "main")
+    dry_run = getattr(args, "dry_run", False)
+
+    cfg = config.get_config()
+    console.print(f"[bold]Checking alerts for '{watchlist_id}'...[/bold]")
+
+    try:
+        from marketwatcher.watchlist import get_watchlist
+        from marketwatcher.providers.coingecko import CoinGeckoProvider
+        from marketwatcher.providers.geckoterminal import GeckoTerminalProvider
+        from marketwatcher.reports.watchlist import build_watchlist_report
+        from marketwatcher.alerts import check_alerts, format_alerts_batch
+        from marketwatcher.publishers.telegram import TelegramPublisher
+
+        wl = get_watchlist(watchlist_id)
+        if not wl.get("tokens"):
+            console.print("[yellow]Watchlist is empty.[/yellow]")
+            return 0
+
+        cg = CoinGeckoProvider(cache_ttl=cfg.provider.cache_ttl, timeout=cfg.provider.timeout,
+                               retry_count=cfg.provider.retry_count, backoff_factor=cfg.provider.backoff_factor)
+        gt = GeckoTerminalProvider(cache_ttl=cfg.provider.cache_ttl, timeout=cfg.provider.timeout)
+
+        report_data = build_watchlist_report(wl, cg, gt, cfg.report)
+        cg.close()
+        gt.close()
+
+        triggered = check_alerts(wl, report_data)
+
+        if not triggered:
+            console.print("[green]No alerts triggered.[/green]")
+            return 0
+
+        message = format_alerts_batch(triggered)
+        console.print(f"[yellow]{len(triggered)} alert(s) triggered![/yellow]")
+
+        if dry_run:
+            console.print("\n[bold]Alert message:[/bold]\n")
+            console.print(_console_safe_preview(message))
+            return 0
+
+        # Determine alert channel: watchlist alert_chat_id > job chat_id > global default
+        alert_chat_id = wl.get("alert_chat_id") or _get_chat_id(cfg, args)
+        publisher = TelegramPublisher(cfg.telegram.bot_token)
+        result = publisher.send_message(alert_chat_id, message)
+        console.print(f"[green]OK[/green] Alert sent! Message ID: {result.message_id}")
+        return 0
+
+    except Exception as e:
+        logger.error(f"Alerts check failed: {e}")
+        console.print(f"\n[bold red]Error:[/bold red] {e}")
+        return 1
+
+
+def bot(args) -> int:
+    """Run Telegram bot listener for watchlist commands."""
+    from marketwatcher.logging_config import get_logger
+    from marketwatcher.bot import TelegramBot
+
+    logger = get_logger("cli")
+    cfg = config.get_config()
+
+    if not cfg.telegram.bot_token:
+        console.print("[red]TELEGRAM_BOT_TOKEN not set[/red]")
+        return 1
+
+    console.print("[bold]Starting Telegram bot listener...[/bold]")
+    console.print("Commands: /watch, /watchdex, /unwatch, /watchlist, /watchlists")
+    console.print("Press Ctrl+C to stop\n")
+
+    # Restrict to the configured chat_id if set
+    allowed = [cfg.telegram.chat_id] if cfg.telegram.chat_id else None
+
+    tg_bot = TelegramBot(cfg.telegram.bot_token, allowed_chat_ids=allowed)
+    try:
+        tg_bot.run()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Bot stopped[/yellow]")
+    finally:
+        tg_bot.close()
+    return 0
+
+
+def bot_scheduler(args) -> int:
+    """Run both Telegram bot and scheduler in parallel threads."""
+    import threading
+    from marketwatcher.logging_config import get_logger
+    from marketwatcher.bot import TelegramBot
+
+    logger = get_logger("cli")
+    cfg = config.get_config()
+
+    if not cfg.telegram.bot_token:
+        console.print("[red]TELEGRAM_BOT_TOKEN not set[/red]")
+        return 1
+
+    console.print("[bold]Starting bot + scheduler...[/bold]")
+    console.print("Bot commands: /watch, /watchdex, /unwatch, /watchlist, /watchlists")
+    console.print("Press Ctrl+C to stop\n")
+
+    allowed = [cfg.telegram.chat_id] if cfg.telegram.chat_id else None
+    tg_bot = TelegramBot(cfg.telegram.bot_token, allowed_chat_ids=allowed)
+
+    # Run scheduler in a daemon thread
+    sched_thread = threading.Thread(
+        target=scheduler,
+        args=(args,),
+        daemon=True,
+        name="scheduler",
+    )
+    sched_thread.start()
+
+    # Run bot in main thread (catches Ctrl+C)
+    try:
+        tg_bot.run()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping...[/yellow]")
+    finally:
+        tg_bot.close()
     return 0
 
 
@@ -651,6 +994,36 @@ def main():
     )
     onchain_parser.set_defaults(func=onchain)
 
+    # Global on-chain command
+    global_onchain_parser = subparsers.add_parser(
+        "global-onchain", help="Global DeFi on-chain overview (DefiLlama)"
+    )
+    global_onchain_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without sending"
+    )
+    global_onchain_parser.set_defaults(func=global_onchain)
+
+    # Watchlist report command
+    watchlist_parser = subparsers.add_parser(
+        "watchlist", help="Run watchlist report"
+    )
+    watchlist_parser.add_argument("--dry-run", action="store_true", help="Preview without sending")
+    watchlist_parser.add_argument("--watchlist-id", default="main", help="Watchlist ID (default: main)")
+    watchlist_parser.add_argument("--check-alerts", action="store_true", help="Also check alerts after report")
+    watchlist_parser.set_defaults(func=watchlist_cmd)
+
+    # Watchlist manage command
+    wl_manage = subparsers.add_parser(
+        "watchlist-manage", help="Add/remove/list watchlist tokens"
+    )
+    wl_manage.add_argument("action", choices=["add", "remove", "list"])
+    wl_manage.add_argument("--symbol", type=str, help="Token symbol")
+    wl_manage.add_argument("--coingecko-id", type=str, help="CoinGecko ID (for CEX tokens)")
+    wl_manage.add_argument("--chain", type=str, help="Chain (for DEX tokens)")
+    wl_manage.add_argument("--address", type=str, help="Token address (for DEX tokens)")
+    wl_manage.add_argument("--watchlist-id", default="main", help="Watchlist ID (default: main)")
+    wl_manage.set_defaults(func=watchlist_manage)
+
     # Chains command
     chains_parser = subparsers.add_parser(
         "chains", help="Manage chain list (refresh, list)"
@@ -662,6 +1035,26 @@ def main():
         "--search", type=str, help="Search for chains matching query"
     )
     chains_parser.set_defaults(func=chains)
+
+    # Alerts command
+    alerts_parser = subparsers.add_parser(
+        "alerts", help="Check watchlist alerts"
+    )
+    alerts_parser.add_argument("--dry-run", action="store_true", help="Preview without sending")
+    alerts_parser.add_argument("--watchlist-id", default="main", help="Watchlist ID (default: main)")
+    alerts_parser.set_defaults(func=alerts_cmd)
+
+    # Bot command
+    bot_parser = subparsers.add_parser(
+        "bot", help="Run Telegram bot listener for watchlist commands"
+    )
+    bot_parser.set_defaults(func=bot)
+
+    # Bot + Scheduler command
+    bot_sched_parser = subparsers.add_parser(
+        "bot-scheduler", help="Run bot listener and scheduler together"
+    )
+    bot_sched_parser.set_defaults(func=bot_scheduler)
 
     # TUI command
     tui_parser = subparsers.add_parser(
