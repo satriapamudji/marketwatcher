@@ -13,12 +13,14 @@
 {{ divider_line }}
 
 <b>TVL by Chain:</b>
-{% for chain in top_chains %}• {{ chain.name }}: {{ chain.tvl }} ({{ chain.dominance }})
+{% for chain in top_chains %}• {{ chain.name }}: {{ chain.tvl }} ({{ chain.dominance }}) | 1D: {{ chain.change_1d }} | 7D: {{ chain.change_7d }}
 {% endfor %}
-{% if tvl_gainers %}<b>TVL Gainers (7D):</b>
-{% for chain in tvl_gainers %}• {{ chain.name }}: {{ chain.change }}
-{% endfor %}{% endif %}
-{% if tvl_losers %}<b>TVL Losers (7D):</b>
-{% for chain in tvl_losers %}• {{ chain.name }}: {{ chain.change }}
+{{ divider_line }}
+{% if tvl_gainers %}
+<b>TVL Gainers (7D):</b>
+{% for chain in tvl_gainers %}• {% if chain.streak >= 2 %}{{ chain.name }} (🔥{{ chain.streak }}){% else %}{{ chain.name }}{% endif %}: {{ chain.change }}
+{% endfor %}{% endif %}{% if tvl_losers %}
+<b>TVL Losers (7D):</b>
+{% for chain in tvl_losers %}• {% if chain.streak >= 2 %}{{ chain.name }} (🧊{{ chain.streak }}){% else %}{{ chain.name }}{% endif %}: {{ chain.change }}
 {% endfor %}{% endif %}
 {{ divider_line }}

@@ -51,6 +51,8 @@ class PoolData:
     liquidity: float = 0
     market_cap: float | None = None
     price_change_24h: float | None = None
+    price_change_h6: float | None = None
+    price_change_h1: float | None = None
     fdv: float = 0
     dex: str = ""
     network: str = ""
@@ -192,14 +194,28 @@ class GeckoTerminalProvider:
                 volume_data = attrs.get("volume_usd", {})
                 volume_24h = float(volume_data.get("h24", 0) or 0)
 
-                # Extract price change (nested dict)
+                # Extract price changes (nested dict with m5, m15, m30, h1, h6, h24)
                 price_change_data = attrs.get("price_change_percentage", {})
                 price_change_24h = None
+                price_change_h6 = None
+                price_change_h1 = None
                 if isinstance(price_change_data, dict):
                     try:
                         price_change_24h = float(price_change_data.get("h24", 0) or 0)
                     except (ValueError, TypeError):
-                        price_change_24h = None
+                        pass
+                    try:
+                        raw_h6 = price_change_data.get("h6")
+                        if raw_h6 is not None:
+                            price_change_h6 = float(raw_h6)
+                    except (ValueError, TypeError):
+                        pass
+                    try:
+                        raw_h1 = price_change_data.get("h1")
+                        if raw_h1 is not None:
+                            price_change_h1 = float(raw_h1)
+                    except (ValueError, TypeError):
+                        pass
 
                 full_pool_id = pool.get("id", "")
                 pool_address = full_pool_id.split("_", 1)[1] if "_" in full_pool_id else full_pool_id
@@ -217,6 +233,8 @@ class GeckoTerminalProvider:
                     liquidity=float(attrs.get("reserve_in_usd", 0) or 0),
                     market_cap=float(attrs.get("market_cap_usd")) if attrs.get("market_cap_usd") is not None else None,
                     price_change_24h=price_change_24h,
+                    price_change_h6=price_change_h6,
+                    price_change_h1=price_change_h1,
                     fdv=float(attrs.get("fdv_usd", 0) or 0),
                     dex=attrs.get("name", "").split("/")[-1].strip() if "/" in attrs.get("name", "") else "",
                     network=network,
@@ -324,12 +342,26 @@ class GeckoTerminalProvider:
             base_token = name.split("/")[0].strip() if "/" in name else name
 
             price_change = None
+            price_change_h6 = None
+            price_change_h1 = None
             price_changes = attrs.get("price_change_percentage", {})
             if isinstance(price_changes, dict):
                 raw = price_changes.get("h24")
                 if raw is not None:
                     try:
                         price_change = float(raw)
+                    except (ValueError, TypeError):
+                        pass
+                raw_h6 = price_changes.get("h6")
+                if raw_h6 is not None:
+                    try:
+                        price_change_h6 = float(raw_h6)
+                    except (ValueError, TypeError):
+                        pass
+                raw_h1 = price_changes.get("h1")
+                if raw_h1 is not None:
+                    try:
+                        price_change_h1 = float(raw_h1)
                     except (ValueError, TypeError):
                         pass
 
@@ -379,6 +411,8 @@ class GeckoTerminalProvider:
                 liquidity=liquidity,
                 market_cap=market_cap,
                 price_change_24h=price_change,
+                price_change_h6=price_change_h6,
+                price_change_h1=price_change_h1,
                 fdv=fdv,
                 price_usd=price_usd,
                 network=net_id,

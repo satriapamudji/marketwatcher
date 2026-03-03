@@ -72,21 +72,34 @@ def render_global_onchain_fallback(
     ]
 
     for chain in report_data.get("top_chains", []):
-        lines.append(f"• {escape_html(chain['name'])}: {chain['tvl']} ({chain['dominance']})")
+        change_1d = chain.get("change_1d", "N/A")
+        change_7d = chain.get("change_7d", "N/A")
+        lines.append(
+            f"• {escape_html(chain['name'])}: {chain['tvl']} ({chain['dominance']})"
+            f" | 1D: {change_1d} | 7D: {change_7d}"
+        )
+
+    lines.extend(["", divider_line])
 
     gainers = report_data.get("tvl_gainers", [])
     if gainers:
         lines.append("")
         lines.append("<b>TVL Gainers (7D):</b>")
         for chain in gainers:
-            lines.append(f"• {escape_html(chain['name'])}: {chain['change']}")
+            name = escape_html(chain["name"])
+            streak = chain.get("streak", 1)
+            prefix = f"{name} (\U0001f525{streak})" if streak >= 2 else name
+            lines.append(f"• {prefix}: {chain['change']}")
 
     losers = report_data.get("tvl_losers", [])
     if losers:
         lines.append("")
         lines.append("<b>TVL Losers (7D):</b>")
         for chain in losers:
-            lines.append(f"• {escape_html(chain['name'])}: {chain['change']}")
+            name = escape_html(chain["name"])
+            streak = chain.get("streak", 1)
+            prefix = f"{name} (\U0001f9ca{streak})" if streak >= 2 else name
+            lines.append(f"• {prefix}: {chain['change']}")
 
     lines.extend(["", divider_line])
     return "\n".join(lines)

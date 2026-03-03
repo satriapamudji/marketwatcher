@@ -1,8 +1,10 @@
 """On-chain report builder for GeckoTerminal data."""
 
+import json
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from marketwatcher.logging_config import get_logger
@@ -10,6 +12,8 @@ from marketwatcher.providers.geckoterminal import GeckoTerminalProvider, PoolDat
 from marketwatcher.config import ReportConfig, OnchainConfig
 
 logger = get_logger("reports")
+
+TOKEN_STREAKS_PATH = Path("config/token_streaks.json")
 
 
 NATIVE_SYMBOLS_BY_NETWORK: dict[str, set[str]] = {
@@ -161,6 +165,61 @@ def aggregate_tokens(pools: list[PoolData], config: OnchainConfig, network: str)
     return sorted(tokens, key=lambda x: x["volume_24h"], reverse=True)
 
 
+def _load_token_streaks(path: Path = TOKEN_STREAKS_PATH) -> dict:
+    """Load per-network token streak data."""
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Failed to load token streaks from %s: %s", path, e)
+    return {}
+
+
+def _save_token_streaks(data: dict, path: Path = TOKEN_STREAKS_PATH) -> None:
+    """Save per-network token streak data."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("Failed to save token streaks to %s: %s", path, e)
+
+
+def _update_token_streaks(
+    network: str,
+    gainers: list[dict],
+    losers: list[dict],
+    path: Path = TOKEN_STREAKS_PATH,
+) -> tuple[list[dict], list[dict]]:
+    """Update per-network token streak counts."""
+    all_data = _load_token_streaks(path)
+    net_data = all_data.get(network, {"gainers": {}, "losers": {}})
+    prev_gainers = net_data.get("gainers", {})
+    prev_losers = net_data.get("losers", {})
+
+    new_gainers: dict[str, int] = {}
+    for g in gainers:
+        sym = g["symbol"].upper()
+        streak = prev_gainers.get(sym, 0) + 1
+        g["streak"] = streak
+        new_gainers[sym] = streak
+
+    new_losers: dict[str, int] = {}
+    for l in losers:
+        sym = l["symbol"].upper()
+        streak = prev_losers.get(sym, 0) + 1
+        l["streak"] = streak
+        new_losers[sym] = streak
+
+    all_data[network] = {
+        "last_run": datetime.now(timezone.utc).isoformat(),
+        "gainers": new_gainers,
+        "losers": new_losers,
+    }
+    _save_token_streaks(all_data, path)
+
+    return gainers, losers
+
+
 def build_onchain_report(
     provider: GeckoTerminalProvider,
     network: str,
@@ -284,6 +343,8 @@ def build_onchain_report(
             "token_address": pool.base_token_address,
             "token_address_short": shorten_ca(pool.base_token_address),
             "change": format_pct(pool.price_change_24h),
+            "change_h6": format_pct(pool.price_change_h6),
+            "change_h1": format_pct(pool.price_change_h1),
             "volume": format_volume_usd(pool.volume_24h),
             "liquidity": format_volume_usd(pool.liquidity),
             "mcap_label": "MCAP" if pool.market_cap is not None else "FDV",
@@ -301,6 +362,8 @@ def build_onchain_report(
             "token_address": pool.base_token_address,
             "token_address_short": shorten_ca(pool.base_token_address),
             "change": format_pct(pool.price_change_24h),
+            "change_h6": format_pct(pool.price_change_h6),
+            "change_h1": format_pct(pool.price_change_h1),
             "volume": format_volume_usd(pool.volume_24h),
             "liquidity": format_volume_usd(pool.liquidity),
             "mcap_label": "MCAP" if pool.market_cap is not None else "FDV",
@@ -308,6 +371,11 @@ def build_onchain_report(
         })
         if len(formatted_losers) >= losers_count:
             break
+
+    # Update streak tracking for gainers/losers (per-network)
+    formatted_gainers, formatted_losers = _update_token_streaks(
+        network, formatted_gainers, formatted_losers,
+    )
 
     return {
         "network": network,

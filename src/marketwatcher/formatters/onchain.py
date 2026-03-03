@@ -41,9 +41,11 @@ def render_onchain_report(report_data: dict, config: Any = None) -> str:
     return message
 
 
-def _render_section_lines(network: str, title: str, rows: list[dict]) -> list[str]:
-    lines: list[str] = [f"<b>{title}</b>"]
-    for row in rows:
+def _render_section_lines(
+    network: str, title: str, emoji: str, rows: list[dict], streak_emoji: str = "\U0001f525",
+) -> list[str]:
+    lines: list[str] = ["", f"{emoji} <b>{title}</b>"]
+    for idx, row in enumerate(rows, 1):
         symbol = escape_html(row.get("symbol") or row.get("name", ""))
         change = escape_html(row.get("change", "N/A"))
         pool_addr = escape_html(row.get("address", ""))
@@ -51,7 +53,15 @@ def _render_section_lines(network: str, title: str, rows: list[dict]) -> list[st
         liquidity = escape_html(row.get("liquidity", ""))
         mcap = escape_html(row.get("mcap", ""))
         mcap_label = escape_html(row.get("mcap_label", "MCAP"))
-        line = f"• <a href=\"https://www.geckoterminal.com/{network}/pools/{pool_addr}\">{symbol}</a> ({change})"
+        streak = row.get("streak", 1)
+        change_h1 = escape_html(row.get("change_h1", "N/A"))
+        change_h6 = escape_html(row.get("change_h6", "N/A"))
+        link = f'<a href="https://www.geckoterminal.com/{network}/pools/{pool_addr}">{symbol}</a>'
+        if streak >= 2:
+            link = f"{link} ({streak_emoji}{streak})"
+        lines.append(f"")
+        lines.append(f"{idx}. {link}")
+        lines.append(f"\u2570\u27a4 1H: {change_h1} \u00b7 6H: {change_h6} \u00b7 1D: {change}")
         detail_parts: list[str] = []
         if volume:
             detail_parts.append(f"Vol {volume}")
@@ -59,9 +69,8 @@ def _render_section_lines(network: str, title: str, rows: list[dict]) -> list[st
             detail_parts.append(f"Liq {liquidity}")
         if mcap:
             detail_parts.append(f"{mcap_label} {mcap}")
-        lines.append(line)
         if detail_parts:
-            lines.append(f"↳ {' · '.join(detail_parts)}")
+            lines.append(f"\u2570\u27a4 {' \u00b7 '.join(detail_parts)}")
     return lines
 
 
@@ -77,12 +86,17 @@ def render_onchain_fallback(report_data: dict, divider_line: str = "------------
     losers = report_data.get("top_losers", [])
 
     if gainers:
-        lines.append("")
-        lines.extend(_render_section_lines(network, "Top Gainers (24h):", gainers[:8]))
+        lines.extend(_render_section_lines(
+            network, "Top Gainers", "\U0001f4c8", gainers[:8], streak_emoji="\U0001f525",
+        ))
+
+    if gainers:
+        lines.extend(["", divider_line])
 
     if losers:
-        lines.append("")
-        lines.extend(_render_section_lines(network, "Top Losers (24h):", losers[:8]))
+        lines.extend(_render_section_lines(
+            network, "Top Losers", "\U0001f4c9", losers[:8], streak_emoji="\U0001f9ca",
+        ))
 
     lines.extend(["", divider_line])
     return "\n".join(lines)

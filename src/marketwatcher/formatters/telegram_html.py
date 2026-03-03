@@ -116,6 +116,7 @@ def render_fallback(summary: MarketSummary, config: ReportConfig) -> str:
 
     lines = [
         f"<i>{ts}</i>",
+        "<b><u>Global Crypto</u></b>",
         divider,
         "",
         f"<b>Global MCAP:</b> {summary.formatted_global_mcap}",
@@ -123,25 +124,27 @@ def render_fallback(summary: MarketSummary, config: ReportConfig) -> str:
         "",
         f"<b>BTC Dominance:</b> {summary.formatted_btc_dominance}",
         f"<b>╰➤ 1D:</b> {summary.formatted_btc_dominance_1d} | <b>7D:</b> {summary.formatted_btc_dominance_7d} | <b>14D:</b> {summary.formatted_btc_dominance_14d}",
+        "",
         divider,
         "",
         "<b>Top Gainers (24h):</b>",
     ]
 
-    for i, cat in enumerate(summary.top_gainers, 1):
+    for cat in summary.top_gainers:
         change = format_signed_pct(cat.pct_change_24h, config.decimals)
         name = escape_html(cat.category_name)
         url = f"https://www.coingecko.com/en/categories/{cat.category_id}"
-        lines.append(f"• <a href=\"{url}\">{name}</a> ({change})")
+        lines.append(f'• <a href="{url}">{name}</a> ({change})')
 
+    lines.append("")
     lines.append("<b>Top Losers (24h):</b>")
 
-    for i, cat in enumerate(summary.top_losers, 1):
+    for cat in summary.top_losers:
         change = format_signed_pct(cat.pct_change_24h, config.decimals)
         name = escape_html(cat.category_name)
         url = f"https://www.coingecko.com/en/categories/{cat.category_id}"
-        lines.append(f"• <a href=\"{url}\">{name}</a> ({change})")
+        lines.append(f'• <a href="{url}">{name}</a> ({change})')
 
-    lines.append(divider)
+    lines.extend(["", divider])
 
     return "\n".join(lines)

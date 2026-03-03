@@ -4,11 +4,13 @@ Produces a DeFi overview with:
 - Total DeFi TVL + 1D/7D/14D changes
 - 24h DEX volume
 - Stablecoin supply
-- TVL by chain (top N)
-- TVL chain gainers/losers (7D)
+- TVL by chain (top N) with per-chain 1D/7D changes
+- TVL chain gainers/losers (7D) with streak tracking
 """
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from marketwatcher.config import ReportConfig
@@ -16,6 +18,8 @@ from marketwatcher.logging_config import get_logger
 from marketwatcher.providers.defillama import DefiLlamaProvider
 
 logger = get_logger("reports")
+
+STREAKS_PATH = Path("config/chain_streaks.json")
 
 
 def _format_usd(value: float) -> str:
@@ -63,6 +67,59 @@ def _pct_change(current: float, previous: float | None) -> float | None:
     return ((current - previous) / previous) * 100
 
 
+def _load_streaks(path: Path = STREAKS_PATH) -> dict:
+    """Load streak data from JSON file."""
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Failed to load streaks from %s: %s", path, e)
+    return {"gainers": {}, "losers": {}}
+
+
+def _save_streaks(data: dict, path: Path = STREAKS_PATH) -> None:
+    """Save streak data to JSON file."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("Failed to save streaks to %s: %s", path, e)
+
+
+def _update_streaks(
+    gainers: list[dict], losers: list[dict], path: Path = STREAKS_PATH
+) -> tuple[list[dict], list[dict]]:
+    """Update streak counts and annotate gainers/losers with streak field."""
+    prev = _load_streaks(path)
+    prev_gainers = prev.get("gainers", {})
+    prev_losers = prev.get("losers", {})
+
+    new_gainers_map: dict[str, int] = {}
+    for g in gainers:
+        name = g["name"]
+        streak = prev_gainers.get(name, 0) + 1
+        g["streak"] = streak
+        new_gainers_map[name] = streak
+
+    new_losers_map: dict[str, int] = {}
+    for l in losers:
+        name = l["name"]
+        streak = prev_losers.get(name, 0) + 1
+        l["streak"] = streak
+        new_losers_map[name] = streak
+
+    _save_streaks(
+        {
+            "last_run": datetime.now(timezone.utc).isoformat(),
+            "gainers": new_gainers_map,
+            "losers": new_losers_map,
+        },
+        path,
+    )
+
+    return gainers, losers
+
+
 def build_global_onchain_report(
     provider: DefiLlamaProvider,
     config: ReportConfig,
@@ -105,42 +162,57 @@ def build_global_onchain_report(
     stablecoin_chains = provider.get_stablecoin_chains()
     total_stablecoin = sum(c["stablecoin_mcap"] for c in stablecoin_chains)
 
-    # 5. Top chains by TVL with dominance
+    # 5. Fetch history for top 30 chains (used for both top chains 1D/7D and gainers/losers)
+    candidate_chains = chains[:30]
+    chain_history: dict[str, list[dict]] = {}
+
+    for chain in candidate_chains:
+        try:
+            history = provider.get_historical_tvl(chain["name"])
+            if history and len(history) >= 2:
+                chain_history[chain["name"]] = history
+        except Exception as e:
+            logger.warning(f"Failed to get history for {chain['name']}: {e}")
+
+    # 6. Top chains by TVL with dominance + 1D/7D changes
     top_chains = []
     for chain in chains[:top_chains_count]:
         dominance = (chain["tvl"] / total_tvl * 100) if total_tvl > 0 else 0
+        history = chain_history.get(chain["name"])
+        if history and len(history) >= 2:
+            current = history[-1]["tvl"]
+            change_1d = _pct_change(current, _tvl_at_days_ago(history, 1))
+            change_7d = _pct_change(current, _tvl_at_days_ago(history, 7))
+        else:
+            change_1d = None
+            change_7d = None
         top_chains.append({
             "name": chain["name"],
             "tvl": _format_usd(chain["tvl"]),
             "tvl_raw": chain["tvl"],
             "dominance": f"{dominance:.1f}%",
+            "change_1d": _format_pct(change_1d),
+            "change_7d": _format_pct(change_7d),
         })
 
-    # 6. Get 7D TVL changes per chain for gainers/losers
-    #    Fetch history for a broader set of chains to find movers
+    # 7. Get 7D TVL changes per chain for gainers/losers
     chain_changes: list[dict] = []
-    candidate_chains = chains[:30]  # Top 30 by TVL for mover candidates
-
     for chain in candidate_chains:
-        try:
-            history = provider.get_historical_tvl(chain["name"])
-            if not history or len(history) < 8:
-                continue
-
-            current = history[-1]["tvl"]
-            prev_7d = _tvl_at_days_ago(history, 7)
-            change = _pct_change(current, prev_7d)
-
-            if change is not None:
-                chain_changes.append({
-                    "name": chain["name"],
-                    "change_raw": change,
-                    "change": _format_pct(change),
-                    "tvl": _format_usd(current),
-                })
-        except Exception as e:
-            logger.warning(f"Failed to get history for {chain['name']}: {e}")
+        history = chain_history.get(chain["name"])
+        if not history or len(history) < 8:
             continue
+
+        current = history[-1]["tvl"]
+        prev_7d = _tvl_at_days_ago(history, 7)
+        change = _pct_change(current, prev_7d)
+
+        if change is not None:
+            chain_changes.append({
+                "name": chain["name"],
+                "change_raw": change,
+                "change": _format_pct(change),
+                "tvl": _format_usd(current),
+            })
 
     # Sort for gainers (biggest positive) and losers (biggest negative)
     gainers = sorted(
@@ -153,6 +225,9 @@ def build_global_onchain_report(
         [c for c in chain_changes if c["change_raw"] < 0],
         key=lambda x: x["change_raw"],
     )[:tvl_movers_count]
+
+    # 8. Update streak tracking for gainers/losers
+    gainers, losers = _update_streaks(gainers, losers)
 
     divider_style = getattr(config, "divider_style", None)
     divider_line = (divider_style * 10) if divider_style else "--------------------------------"

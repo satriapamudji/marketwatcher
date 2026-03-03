@@ -1,14 +1,20 @@
 <i>{{ timestamp.strftime(config.timestamp_format) }}</i>
 <b><u>On-Chain: {{ network_name }}</u></b>
 {{ divider_line }}
-
-{% if top_gainers %}<b>Top Gainers (24h):</b>
-{% for pool in top_gainers %}• <a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a> ({{ pool.change }})
-↳ Vol {{ pool.volume }} · Liq {{ pool.liquidity }} · {{ pool.mcap_label }} {{ pool.mcap }}
-{% endfor %}{% endif %}
-
-{% if top_losers %}<b>Top Losers (24h):</b>
-{% for pool in top_losers %}• <a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a> ({{ pool.change }})
-↳ Vol {{ pool.volume }} · Liq {{ pool.liquidity }} · {{ pool.mcap_label }} {{ pool.mcap }}
-{% endfor %}{% endif %}
+{% if top_gainers %}
+📈 <b>Top Gainers</b>
+{% for pool in top_gainers %}
+{{ loop.index }}. {% if pool.streak >= 2 %}<a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a> (🔥{{ pool.streak }}){% else %}<a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a>{% endif %}
+╰➤ 1H: {{ pool.change_h1 }} · 6H: {{ pool.change_h6 }} · 1D: {{ pool.change }}
+╰➤ Vol {{ pool.volume }} · Liq {{ pool.liquidity }} · {{ pool.mcap_label }} {{ pool.mcap }}
+{% endfor %}
 {{ divider_line }}
+{% endif %}{% if top_losers %}
+📉 <b>Top Losers</b>
+{% for pool in top_losers %}
+{{ loop.index }}. {% if pool.streak >= 2 %}<a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a> (🧊{{ pool.streak }}){% else %}<a href="https://www.geckoterminal.com/{{ network }}/pools/{{ pool.address }}">{{ pool.symbol }}</a>{% endif %}
+╰➤ 1H: {{ pool.change_h1 }} · 6H: {{ pool.change_h6 }} · 1D: {{ pool.change }}
+╰➤ Vol {{ pool.volume }} · Liq {{ pool.liquidity }} · {{ pool.mcap_label }} {{ pool.mcap }}
+{% endfor %}
+{{ divider_line }}
+{% endif %}
