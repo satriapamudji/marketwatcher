@@ -233,13 +233,15 @@ class TelegramBot:
         self._send(chat_id, "\n".join(lines))
 
     def _cmd_alert(self, chat_id: int, args: list[str]) -> None:
-        """Handle /alert SYMBOL above|below|pct|off VALUE [watchlist_id]"""
+        """Handle /alert SYMBOL above|below|pct|pctup|pctdown|off VALUE [watchlist_id]"""
         if len(args) < 2:
             self._send(chat_id, (
                 "Usage:\n"
                 "/alert BTC above 100000\n"
                 "/alert BTC below 60000\n"
                 "/alert BTC pct 5\n"
+                "/alert BTC pctup 4\n"
+                "/alert BTC pctdown 6\n"
                 "/alert BTC off"
             ))
             return
@@ -274,8 +276,12 @@ class TelegramBot:
             ok = set_token_alerts(watchlist_id, symbol, alert_below=value)
         elif action == "pct":
             ok = set_token_alerts(watchlist_id, symbol, alert_pct=value)
+        elif action == "pctup":
+            ok = set_token_alerts(watchlist_id, symbol, alert_pct_up=value)
+        elif action == "pctdown":
+            ok = set_token_alerts(watchlist_id, symbol, alert_pct_down=value)
         else:
-            self._send(chat_id, f"Unknown action '{action}'. Use: above, below, pct, off")
+            self._send(chat_id, f"Unknown action '{action}'. Use: above, below, pct, pctup, pctdown, off")
             return
 
         if ok:
@@ -290,28 +296,49 @@ class TelegramBot:
         wl = get_watchlist(watchlist_id)
         tokens = wl.get("tokens", [])
 
-        alert_lines = [f"<b>Alerts: {wl.get('name', watchlist_id)}</b>"]
+        alert_lines = [f"<b>\U0001f6a8 Alert Config: {wl.get('name', watchlist_id)}</b>"]
 
         # Watchlist-level default
         wl_pct = wl.get("alert_pct")
-        if wl_pct:
-            alert_lines.append(f"  Default: \u00b1{wl_pct}% change")
+        wl_pct_up = wl.get("alert_pct_up")
+        wl_pct_down = wl.get("alert_pct_down")
+        if wl_pct_up is not None or wl_pct_down is not None:
+            up_text = f"+{wl_pct_up}%" if wl_pct_up is not None else "off"
+            down_text = f"-{wl_pct_down}%" if wl_pct_down is not None else "off"
+            alert_lines.append(f"<i>Default momentum thresholds: up {up_text}, down {down_text}</i>")
+        elif wl_pct:
+            alert_lines.append(f"<i>Default momentum threshold: \u00b1{wl_pct}%</i>")
+
+        wl_alert_chat = wl.get("alert_chat_id")
+        if wl_alert_chat:
+            alert_lines.append(f"<i>Alert channel override: {wl_alert_chat}</i>")
+        else:
+            alert_lines.append("<i>Alert channel: default</i>")
 
         has_alerts = False
         for t in tokens:
             parts = []
             if "alert_above" in t:
-                parts.append(f"above ${t['alert_above']:,.2f}")
+                parts.append(f"\u2b06 above ${t['alert_above']:,.2f}")
             if "alert_below" in t:
-                parts.append(f"below ${t['alert_below']:,.2f}")
-            if "alert_pct" in t:
-                parts.append(f"\u00b1{t['alert_pct']}%")
+                parts.append(f"\u2b07 below ${t['alert_below']:,.2f}")
+            if "alert_pct_up" in t:
+                parts.append(f"\U0001f4c8 +{t['alert_pct_up']}%")
+            if "alert_pct_down" in t:
+                parts.append(f"\U0001f4c9 -{t['alert_pct_down']}%")
+            if "alert_pct" in t and "alert_pct_up" not in t and "alert_pct_down" not in t:
+                parts.append(f"\U0001f4c9/\U0001f4c8 \u00b1{t['alert_pct']}%")
             if parts:
                 has_alerts = True
-                alert_lines.append(f"  <b>{t.get('symbol', '?')}</b>: {', '.join(parts)}")
+                alert_lines.append(f"\u2022 <b>{t.get('symbol', '?')}</b>: {', '.join(parts)}")
 
-        if not has_alerts and not wl_pct:
-            alert_lines.append("\n<i>No alerts set. Use /alert SYMBOL above|below|pct VALUE</i>")
+        has_wl_defaults = (
+            wl_pct is not None
+            or wl_pct_up is not None
+            or wl_pct_down is not None
+        )
+        if not has_alerts and not has_wl_defaults:
+            alert_lines.append("\n<i>No alerts set. Use /alert SYMBOL above|below|pct|pctup|pctdown VALUE</i>")
 
         self._send(chat_id, "\n".join(alert_lines))
 
@@ -329,6 +356,8 @@ class TelegramBot:
             "/alert SYMBOL above PRICE\n"
             "/alert SYMBOL below PRICE\n"
             "/alert SYMBOL pct PERCENT\n"
+            "/alert SYMBOL pctup PERCENT\n"
+            "/alert SYMBOL pctdown PERCENT\n"
             "/alert SYMBOL off\n"
             "/alerts [watchlist_id]"
         ))

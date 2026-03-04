@@ -52,13 +52,18 @@ def render_watchlist_fallback(report_data: dict) -> str:
 
     for token in report_data.get("tokens", []):
         sym = escape_html(token.get("symbol", "???"))
+        token_url = str(token.get("token_url", "") or "").strip()
+        if token_url:
+            sym_label = f'<a href="{escape_html(token_url)}">{sym}</a>'
+        else:
+            sym_label = sym
         if token.get("type") == "cex":
-            lines.append(f"\n<b>{sym}:</b> {token.get('price', 'N/A')} ({token.get('change_24h', 'N/A')})")
+            lines.append(f"\n<b>{sym_label}:</b> {token.get('price', 'N/A')} ({token.get('change_24h', 'N/A')})")
             lines.append(f"<b>╰➤ 7D:</b> {token.get('change_7d', 'N/A')} | "
                          f"<b>{token.get('mcap_label', 'MCAP')}:</b> {token.get('mcap', 'N/A')}")
         else:
             price = token.get('price', 'N/A')
-            lines.append(f"\n<b>{sym}:</b> {price} ({token.get('change_24h', 'N/A')})")
+            lines.append(f"\n<b>{sym_label}:</b> {price} ({token.get('change_24h', 'N/A')})")
             lines.append(f"<b>╰➤</b> Vol {token.get('volume', 'N/A')} · "
                          f"Liq {token.get('liquidity', 'N/A')} · "
                          f"<b>{token.get('mcap_label', 'FDV')}:</b> {token.get('mcap', 'N/A')}")

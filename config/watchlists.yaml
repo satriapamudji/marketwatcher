@@ -5,6 +5,38 @@ watchlists:
   - symbol: BTC
     type: cex
     coingecko_id: bitcoin
+    alert_pct: 4.0
   - symbol: ETH
     type: cex
     coingecko_id: ethereum
+    alert_pct: 5.0
+  - symbol: REI
+    type: dex
+    chain: base
+    address: '0x6b2504a03ca4d43d0d73776f6ad46dab2f2a4cfd'
+    alert_pct: 10.0
+  - symbol: VIRTUAL
+    type: dex
+    chain: base
+    address: '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b'
+    alert_pct: 12.0
+  - symbol: VVV
+    type: dex
+    chain: base
+    address: '0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf'
+    alert_pct: 12.0
+  - symbol: NEAR
+    type: cex
+    coingecko_id: near
+    alert_pct: 8.0
+  - symbol: GRASS
+    type: cex
+    coingecko_id: grass
+    alert_pct: 10.0
+  - symbol: GRPH
+    type: dex
+    chain: solana
+    address: 9doRRAik5gvhbEwjbZDbZR6GxXSAfdoomyJR57xKpump
+    alert_pct: 12.0
+  alert_pct: 8.0
+  alert_chat_id: '-1003611619938'

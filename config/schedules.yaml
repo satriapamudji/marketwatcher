@@ -4,15 +4,41 @@ scheduler:
   - id: global_crypto
     type: global
     chain: ''
-    time: '16:10'
+    time: 00:30
     enabled: true
   - id: onchain_solana
     type: onchain
     chain: solana
-    time: 09:05
-    enabled: false
+    time: ''
+    enabled: true
+    interval_hours: 4
+    offset_minutes: 0
+    chat_id: '-1003766441216'
   - id: onchain_base
     type: onchain
     chain: base
-    time: 09:15
-    enabled: false
+    time: ''
+    enabled: true
+    interval_hours: 4
+    offset_minutes: 10
+    chat_id: '-1003766441216'
+  - id: global_onchain_431046
+    type: global_onchain
+    chain: ''
+    time: 00:40
+    enabled: true
+  - id: watchlist_443d9a
+    type: watchlist
+    chain: ''
+    time: ''
+    enabled: true
+    interval_hours: 4
+    offset_minutes: 0
+    chat_id: '-1003811035317'
+    watchlist_id: main
+  - id: macro_f70599
+    type: macro
+    chain: ''
+    time: 00:30
+    enabled: true
+    chat_id: '-1003733164290'

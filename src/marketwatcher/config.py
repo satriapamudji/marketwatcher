@@ -14,9 +14,16 @@ from dotenv import load_dotenv
 
 
 @dataclass
+class TelegramChannelConfig:
+    name: str = ""
+    chat_id: str = ""
+
+
+@dataclass
 class TelegramConfig:
     bot_token: str = ""
     chat_id: str = ""
+    channels: list[TelegramChannelConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -112,6 +119,11 @@ class JobConfig:
 @dataclass
 class SchedulerConfig:
     timezone: str = "UTC"
+    timezone_presets: list[str] = field(default_factory=lambda: [
+        "UTC",
+        "UTC+08:00",
+        "UTC-05:00",
+    ])
     jobs: list[JobConfig] = field(default_factory=list)
 
 
@@ -173,6 +185,26 @@ def load_config(config_dir: Path | None = None, env_file: Path | None = None) ->
 
     # Apply YAML settings
     if yaml_config:
+        if "telegram" in yaml_config and isinstance(yaml_config["telegram"], dict):
+            telegram_cfg = yaml_config["telegram"]
+            default_chat = str(
+                telegram_cfg.get("default_chat_id", telegram_cfg.get("chat_id", ""))
+            ).strip()
+            if default_chat:
+                config.telegram.chat_id = default_chat
+            channels_data = telegram_cfg.get("channels", [])
+            if isinstance(channels_data, list):
+                for item in channels_data:
+                    if not isinstance(item, dict):
+                        continue
+                    chat_id = str(item.get("chat_id", "")).strip()
+                    if not chat_id:
+                        continue
+                    name = str(item.get("name", "")).strip() or chat_id
+                    config.telegram.channels.append(
+                        TelegramChannelConfig(name=name, chat_id=chat_id)
+                    )
+
         if "report" in yaml_config:
             for key, value in yaml_config["report"].items():
                 if hasattr(config.report, key):
@@ -198,10 +230,26 @@ def load_config(config_dir: Path | None = None, env_file: Path | None = None) ->
                 if hasattr(config.logging, key):
                     setattr(config.logging, key, value)
 
+        if "scheduler" in yaml_config and isinstance(yaml_config["scheduler"], dict):
+            scheduler_yaml = yaml_config["scheduler"]
+            if "timezone" in scheduler_yaml:
+                config.scheduler.timezone = str(scheduler_yaml["timezone"])
+            presets = scheduler_yaml.get("timezone_presets")
+            if isinstance(presets, list):
+                cleaned = [str(p).strip() for p in presets if str(p).strip()]
+                if cleaned:
+                    config.scheduler.timezone_presets = cleaned
+
     # Apply scheduler YAML settings (separate file managed by TUI)
     if schedules_yaml:
         scheduler_cfg = schedules_yaml.get("scheduler", schedules_yaml)
-        if "timezone" in scheduler_cfg:
+        # Keep backwards compatibility for timezone in schedules.yaml, but
+        # allow settings.yaml to override if present.
+        if "timezone" in scheduler_cfg and not (
+            "scheduler" in yaml_config
+            and isinstance(yaml_config["scheduler"], dict)
+            and "timezone" in yaml_config["scheduler"]
+        ):
             config.scheduler.timezone = scheduler_cfg["timezone"]
 
         # Check for new format (jobs list)

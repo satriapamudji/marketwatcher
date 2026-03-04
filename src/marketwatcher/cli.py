@@ -481,103 +481,236 @@ def alert_loop(args) -> None:
 
 
 def scheduler(args) -> int:
-    """Run multi-job scheduler using config/schedules.yaml."""
+    """Run durable queue-backed scheduler using config/schedules.yaml."""
     import argparse
     import time
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from marketwatcher.logging_config import get_logger
+    from marketwatcher.scheduler_queue import SchedulerQueue
+    from marketwatcher.timezones import normalize_timezone_label, parse_timezone
 
     logger = get_logger("cli")
     console.print("[bold]Starting scheduler...[/bold]")
     console.print("Press Ctrl+C to stop")
     console.print()
 
-    while True:
-        try:
-            cfg = config.reload_config()
+    poll_seconds = 15.0
+    lease_seconds = 1800
+    max_attempts = 3
+    max_catchup_slots = 48
+    last_next_line = ""
 
-            # Get enabled jobs (interval jobs don't need a time field)
-            enabled_jobs = [
-                j for j in cfg.scheduler.jobs
-                if j.enabled and (j.interval_hours > 0 or j.time)
-            ]
+    def _run_job(job) -> int:
+        if job.type == "global":
+            return run(argparse.Namespace(dry_run=False, schedule=None, chat_id=job.chat_id))
+        elif job.type == "onchain":
+            return onchain(argparse.Namespace(network=job.chain, dry_run=False, chat_id=job.chat_id))
+        elif job.type == "global_onchain":
+            return global_onchain(argparse.Namespace(dry_run=False, chat_id=job.chat_id))
+        elif job.type == "macro":
+            return macro(argparse.Namespace(dry_run=False, chat_id=job.chat_id))
+        elif job.type == "watchlist":
+            return watchlist_cmd(argparse.Namespace(
+                dry_run=False,
+                watchlist_id=job.watchlist_id or "main",
+                chat_id=job.chat_id,
+            ))
+        else:
+            logger.error(f"Unknown job type: {job.type}")
+            return 1
 
-            if not enabled_jobs:
-                console.print("[yellow]No enabled jobs. Sleeping 60s...[/yellow]")
-                time.sleep(60)
-                continue
+    def _slot_step(job) -> timedelta:
+        if job.interval_hours > 0:
+            return timedelta(hours=job.interval_hours)
+        return timedelta(days=1)
 
-            now = datetime.now()
-            next_runs: list[tuple[datetime, object]] = []
+    def _latest_due_slot_utc(now_utc: datetime, job, scheduler_tz) -> datetime:
+        now_local = now_utc.astimezone(scheduler_tz)
+        if job.interval_hours > 0:
+            interval_minutes = job.interval_hours * 60
+            midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            minutes_since_midnight = int((now_local - midnight).total_seconds() // 60)
+            slot_index = (minutes_since_midnight - job.offset_minutes) // interval_minutes
+            slot_local = midnight + timedelta(minutes=job.offset_minutes + (slot_index * interval_minutes))
+            return slot_local.astimezone(timezone.utc)
 
-            for job in enabled_jobs:
-                if job.interval_hours > 0:
-                    # Interval-based scheduling
-                    target = _next_interval_run(now, job.interval_hours, job.offset_minutes)
-                    next_runs.append((target, job))
-                else:
-                    # Daily time-based scheduling
+        hh, mm = _parse_hhmm(job.time)
+        today_slot_local = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if today_slot_local <= now_local:
+            return today_slot_local.astimezone(timezone.utc)
+        return (today_slot_local - timedelta(days=1)).astimezone(timezone.utc)
+
+    def _next_slot_utc(slot_utc: datetime, job) -> datetime:
+        return slot_utc + _slot_step(job)
+
+    def _next_scheduled_slot_utc(now_utc: datetime, job, scheduler_tz) -> datetime:
+        latest_due_utc = _latest_due_slot_utc(now_utc, job, scheduler_tz)
+        next_slot_utc = _next_slot_utc(latest_due_utc, job)
+        while next_slot_utc <= now_utc:
+            next_slot_utc = _next_slot_utc(next_slot_utc, job)
+        return next_slot_utc
+
+    def _retry_delay_seconds(attempt_number: int) -> int:
+        return min(900, 60 * (2 ** max(0, attempt_number - 1)))
+
+    cfg = config.get_config()
+    with SchedulerQueue(cfg.database_path) as queue:
+        while True:
+            try:
+                cfg = config.reload_config()
+                now_utc = datetime.now(timezone.utc)
+                try:
+                    scheduler_tz = parse_timezone(cfg.scheduler.timezone)
+                    scheduler_tz_label = normalize_timezone_label(cfg.scheduler.timezone)
+                except Exception as exc:
+                    logger.error(f"Invalid scheduler timezone '{cfg.scheduler.timezone}': {exc}; using UTC")
+                    scheduler_tz = timezone.utc
+                    scheduler_tz_label = "UTC"
+                stored_tz_label = queue.get_meta("scheduler_timezone")
+                if stored_tz_label != scheduler_tz_label:
+                    if stored_tz_label is not None:
+                        logger.info(
+                            f"Scheduler timezone changed {stored_tz_label} -> {scheduler_tz_label}; "
+                            "resetting schedule watermarks"
+                        )
+                    queue.clear_watermarks()
+                    queue.set_meta("scheduler_timezone", scheduler_tz_label)
+                recovered = queue.recover_expired_leases()
+                if recovered:
+                    logger.warning(f"Recovered {recovered} stale running job(s)")
+
+                enabled_jobs = [
+                    j for j in cfg.scheduler.jobs
+                    if j.enabled and (j.interval_hours > 0 or j.time)
+                ]
+
+                enqueued = 0
+                for job in enabled_jobs:
                     try:
-                        hh, mm = _parse_hhmm(job.time)
+                        watermark = queue.get_watermark(job.id)
+                        if watermark is None:
+                            watermark = _latest_due_slot_utc(now_utc, job, scheduler_tz) - _slot_step(job)
+
+                        next_slot = _next_slot_utc(watermark, job)
+                        queued_for_job = 0
+                        while next_slot <= now_utc and queued_for_job < max_catchup_slots:
+                            if queue.enqueue(
+                                job_id=job.id,
+                                job_type=job.type,
+                                payload={
+                                    "job_id": job.id,
+                                    "type": job.type,
+                                },
+                                scheduled_for_utc=next_slot,
+                                max_attempts=max_attempts,
+                            ):
+                                enqueued += 1
+                            watermark = next_slot
+                            next_slot = _next_slot_utc(watermark, job)
+                            queued_for_job += 1
+
+                        queue.set_watermark(job.id, watermark)
+                        if queued_for_job == max_catchup_slots and next_slot <= now_utc:
+                            logger.warning(
+                                f"Catch-up limit reached for {job.id}; pending historical slots remain"
+                            )
                     except Exception as exc:
-                        logger.error(f"Invalid time for {job.id}: {job.time} ({exc})")
+                        logger.error(f"Failed queueing {job.id}: {exc}")
+
+                if enqueued:
+                    logger.info(f"Enqueued {enqueued} due job(s)")
+
+                processed = 0
+                while True:
+                    queued_job = queue.claim_next_due(lease_seconds=lease_seconds)
+                    if queued_job is None:
+                        break
+
+                    latest_cfg = config.reload_config()
+                    live_jobs = {
+                        j.id: j for j in latest_cfg.scheduler.jobs
+                        if j.enabled and (j.interval_hours > 0 or j.time)
+                    }
+                    current_job = live_jobs.get(queued_job.job_id)
+                    if current_job is None:
+                        logger.info(f"Skipping removed/disabled queued job: {queued_job.job_id}")
+                        queue.mark_done(queued_job.queue_id)
                         continue
 
-                    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                    if target <= now:
-                        target += timedelta(days=1)
-                    next_runs.append((target, job))
+                    attempt_number = queued_job.attempt_count + 1
+                    console.print(
+                        f"[bold cyan]Running:[/bold cyan] {current_job.display_name()} "
+                        f"[dim](attempt {attempt_number}/{queued_job.max_attempts})[/dim]"
+                    )
+                    try:
+                        rc = _run_job(current_job)
+                    except Exception as exc:  # defensive: _run_job generally returns int
+                        logger.error(f"Job {current_job.id} crashed: {exc}")
+                        rc = 1
 
-            if not next_runs:
-                console.print("[yellow]No valid enabled jobs. Sleeping 60s...[/yellow]")
-                time.sleep(60)
-                continue
+                    if rc == 0:
+                        queue.mark_done(queued_job.queue_id)
+                        console.print(f"[green]OK[/green] {current_job.display_name()}")
+                    else:
+                        delay_seconds = _retry_delay_seconds(attempt_number)
+                        will_retry, next_attempt_number = queue.mark_failed(
+                            queued_job,
+                            error_message=f"exit_code={rc}",
+                            retry_delay_seconds=delay_seconds,
+                        )
+                        if will_retry:
+                            console.print(
+                                f"[yellow]RETRY[/yellow] {current_job.display_name()} "
+                                f"[dim](next attempt {next_attempt_number + 1}/{queued_job.max_attempts} "
+                                f"in {delay_seconds}s)[/dim]"
+                            )
+                        else:
+                            console.print(
+                                f"[red]DEAD[/red] {current_job.display_name()} "
+                                f"[dim](attempts exhausted)[/dim]"
+                            )
+                    processed += 1
+                    time.sleep(1)
 
-            target_time, job = min(next_runs, key=lambda x: x[0])
-            wait_seconds = max(0.0, (target_time - now).total_seconds())
-            console.print(
-                f"[dim]Next:[/dim] {job.display_name()} at {target_time:%H:%M} "
-                f"({job.schedule_display()}) "
-                f"[dim]in {wait_seconds/60:.0f} min[/dim]"
-            )
-            time.sleep(wait_seconds)
+                next_candidates: list[datetime] = []
+                next_pending_eta = queue.next_pending_eta()
+                if next_pending_eta is not None:
+                    next_candidates.append(next_pending_eta)
 
-            # Reload config immediately before run
-            cfg = config.reload_config()
-            console.print(f"[bold cyan]Running:[/bold cyan] {job.display_name()}")
+                for job in enabled_jobs:
+                    try:
+                        next_candidates.append(_next_scheduled_slot_utc(now_utc, job, scheduler_tz))
+                    except Exception as exc:
+                        logger.error(f"Invalid schedule for {job.id}: {exc}")
 
-            if job.type == "global":
-                rc = run(argparse.Namespace(dry_run=False, schedule=None, chat_id=job.chat_id))
-            elif job.type == "onchain":
-                rc = onchain(argparse.Namespace(network=job.chain, dry_run=False, chat_id=job.chat_id))
-            elif job.type == "global_onchain":
-                rc = global_onchain(argparse.Namespace(dry_run=False, chat_id=job.chat_id))
-            elif job.type == "macro":
-                rc = macro(argparse.Namespace(dry_run=False, chat_id=job.chat_id))
-            elif job.type == "watchlist":
-                rc = watchlist_cmd(argparse.Namespace(
-                    dry_run=False,
-                    watchlist_id=job.watchlist_id or "main",
-                    chat_id=job.chat_id,
-                ))
-            else:
-                logger.error(f"Unknown job type: {job.type}")
-                rc = 1
+                sleep_seconds = poll_seconds
+                if next_candidates:
+                    next_eta = min(next_candidates)
+                    seconds_until_next = (next_eta - datetime.now(timezone.utc)).total_seconds()
+                    sleep_seconds = max(1.0, min(poll_seconds, seconds_until_next))
+                    next_local = next_eta.astimezone(scheduler_tz)
+                    next_line = (
+                        f"[dim]Next queue check in {sleep_seconds:.0f}s "
+                        f"(next due {next_local:%H:%M} {scheduler_tz_label})[/dim]"
+                    )
+                    if next_line != last_next_line:
+                        console.print(next_line)
+                        last_next_line = next_line
+                elif not enabled_jobs and last_next_line != "NO_ENABLED":
+                    console.print("[yellow]No enabled jobs configured[/yellow]")
+                    last_next_line = "NO_ENABLED"
 
-            status = "OK" if rc == 0 else "ERR"
-            console.print(f"[{'green' if rc == 0 else 'red'}]{status}[/] {job.display_name()}")
+                if processed == 0:
+                    time.sleep(sleep_seconds)
 
-            # Small guard sleep
-            time.sleep(2)
-
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Scheduler stopped[/yellow]")
-            return 0
-        except Exception as e:
-            logger.error(f"Scheduler loop error: {e}")
-            console.print(f"[red]Scheduler error:[/red] {e}")
-            time.sleep(30)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Scheduler stopped[/yellow]")
+                return 0
+            except Exception as e:
+                logger.error(f"Scheduler loop error: {e}")
+                console.print(f"[red]Scheduler error:[/red] {e}")
+                time.sleep(30)
 
 
 def onchain(args) -> int:

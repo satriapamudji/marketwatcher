@@ -4,7 +4,9 @@ Compares live token data from a watchlist report against configured
 thresholds (per-token or watchlist-level defaults).
 """
 
+from datetime import datetime, timezone
 from dataclasses import dataclass
+import html
 from typing import Any
 
 from marketwatcher.logging_config import get_logger
@@ -23,14 +25,23 @@ class Alert:
     watchlist_id: str
     watchlist_name: str = ""
     timeframe: str = "24h"
+    direction: str = ""  # "up" | "down" for pct alerts
+    current_price: float | None = None
+    reference_price: float | None = None
 
 
 def watchlist_has_alerts(watchlist: dict) -> bool:
     """Check if a watchlist has any alert thresholds configured."""
-    if watchlist.get("alert_pct"):
+    if any(
+        watchlist.get(key) is not None
+        for key in ("alert_pct", "alert_pct_up", "alert_pct_down")
+    ):
         return True
     for t in watchlist.get("tokens", []):
-        if t.get("alert_above") or t.get("alert_below") or t.get("alert_pct"):
+        if any(
+            t.get(key) is not None
+            for key in ("alert_above", "alert_below", "alert_pct", "alert_pct_up", "alert_pct_down")
+        ):
             return True
     return False
 
@@ -110,7 +121,9 @@ def check_alerts(watchlist: dict, report_data: dict[str, Any]) -> list[Alert]:
     """
     wl_id = watchlist.get("id", "main")
     wl_name = watchlist.get("name", "Main")
-    wl_default_pct = watchlist.get("alert_pct")
+    wl_default_pct = _normalize_threshold(watchlist.get("alert_pct"))
+    wl_default_pct_up = _normalize_threshold(watchlist.get("alert_pct_up"))
+    wl_default_pct_down = _normalize_threshold(watchlist.get("alert_pct_down"))
 
     # Build lookup: symbol -> token config (with alert fields)
     token_config = {}
@@ -138,6 +151,8 @@ def check_alerts(watchlist: dict, report_data: dict[str, Any]) -> list[Alert]:
                 threshold=alert_above,
                 watchlist_id=wl_id,
                 watchlist_name=wl_name,
+                current_price=price,
+                reference_price=alert_above,
             ))
 
         # Price below threshold
@@ -150,76 +165,214 @@ def check_alerts(watchlist: dict, report_data: dict[str, Any]) -> list[Alert]:
                 threshold=alert_below,
                 watchlist_id=wl_id,
                 watchlist_name=wl_name,
+                current_price=price,
+                reference_price=alert_below,
             ))
 
-        # Percentage change threshold (per-token overrides watchlist default)
-        pct_threshold = cfg.get("alert_pct", wl_default_pct)
-        if pct_threshold is not None:
-            # Check 24h
-            if change is not None and abs(change) >= pct_threshold:
-                triggered.append(Alert(
-                    symbol=symbol,
-                    alert_type="pct_change",
-                    current_value=change,
-                    threshold=pct_threshold,
-                    watchlist_id=wl_id,
-                    watchlist_name=wl_name,
-                    timeframe="24h",
-                ))
-
-            # Check 6h (DEX tokens only — field absent for CEX)
-            change_h6 = token_data.get("change_h6_raw")
-            if change_h6 is not None and abs(change_h6) >= pct_threshold:
-                triggered.append(Alert(
-                    symbol=symbol,
-                    alert_type="pct_change",
-                    current_value=change_h6,
-                    threshold=pct_threshold,
-                    watchlist_id=wl_id,
-                    watchlist_name=wl_name,
-                    timeframe="6h",
-                ))
-
-            # Check 1h (DEX tokens only)
-            change_h1 = token_data.get("change_h1_raw")
-            if change_h1 is not None and abs(change_h1) >= pct_threshold:
-                triggered.append(Alert(
-                    symbol=symbol,
-                    alert_type="pct_change",
-                    current_value=change_h1,
-                    threshold=pct_threshold,
-                    watchlist_id=wl_id,
-                    watchlist_name=wl_name,
-                    timeframe="1h",
-                ))
+        pct_up, pct_down = _resolve_pct_thresholds(
+            cfg,
+            wl_default_pct,
+            wl_default_pct_up,
+            wl_default_pct_down,
+        )
+        if pct_up is not None or pct_down is not None:
+            current_price = price if price else None
+            _append_pct_alerts(
+                triggered,
+                symbol=symbol,
+                watchlist_id=wl_id,
+                watchlist_name=wl_name,
+                change_value=change,
+                timeframe="24h",
+                up_threshold=pct_up,
+                down_threshold=pct_down,
+                current_price=current_price,
+            )
+            _append_pct_alerts(
+                triggered,
+                symbol=symbol,
+                watchlist_id=wl_id,
+                watchlist_name=wl_name,
+                change_value=token_data.get("change_h6_raw"),
+                timeframe="6h",
+                up_threshold=pct_up,
+                down_threshold=pct_down,
+                current_price=current_price,
+            )
+            _append_pct_alerts(
+                triggered,
+                symbol=symbol,
+                watchlist_id=wl_id,
+                watchlist_name=wl_name,
+                change_value=token_data.get("change_h1_raw"),
+                timeframe="1h",
+                up_threshold=pct_up,
+                down_threshold=pct_down,
+                current_price=current_price,
+            )
 
     if triggered:
         logger.info(f"Triggered {len(triggered)} alert(s) for {wl_name}")
     return triggered
 
 
+def _estimate_reference_price(current_price: float | None, pct_change: float | None) -> float | None:
+    """Estimate earlier price from current and percent change."""
+    if current_price is None or pct_change is None:
+        return None
+    denominator = 1.0 + (pct_change / 100.0)
+    if abs(denominator) < 1e-9:
+        return None
+    return current_price / denominator
+
+
+def _normalize_threshold(value: Any) -> float | None:
+    """Convert threshold inputs to positive floats."""
+    if value is None:
+        return None
+    try:
+        return abs(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_pct_thresholds(
+    token_cfg: dict[str, Any],
+    wl_default_pct: float | None,
+    wl_default_pct_up: float | None,
+    wl_default_pct_down: float | None,
+) -> tuple[float | None, float | None]:
+    """Resolve per-token up/down percent thresholds with backward compatibility."""
+    token_pct = _normalize_threshold(token_cfg.get("alert_pct"))
+    token_up = _normalize_threshold(token_cfg.get("alert_pct_up"))
+    token_down = _normalize_threshold(token_cfg.get("alert_pct_down"))
+
+    up_threshold = token_up
+    if up_threshold is None:
+        up_threshold = token_pct
+    if up_threshold is None:
+        up_threshold = wl_default_pct_up
+    if up_threshold is None:
+        up_threshold = wl_default_pct
+
+    down_threshold = token_down
+    if down_threshold is None:
+        down_threshold = token_pct
+    if down_threshold is None:
+        down_threshold = wl_default_pct_down
+    if down_threshold is None:
+        down_threshold = wl_default_pct
+
+    return (up_threshold, down_threshold)
+
+
+def _append_pct_alerts(
+    triggered: list[Alert],
+    *,
+    symbol: str,
+    watchlist_id: str,
+    watchlist_name: str,
+    change_value: float | None,
+    timeframe: str,
+    up_threshold: float | None,
+    down_threshold: float | None,
+    current_price: float | None,
+) -> None:
+    """Append directional pct alerts for one timeframe value."""
+    if change_value is None:
+        return
+
+    if up_threshold is not None and change_value >= up_threshold:
+        triggered.append(Alert(
+            symbol=symbol,
+            alert_type="pct_change",
+            current_value=change_value,
+            threshold=up_threshold,
+            watchlist_id=watchlist_id,
+            watchlist_name=watchlist_name,
+            timeframe=timeframe,
+            direction="up",
+            current_price=current_price,
+            reference_price=_estimate_reference_price(current_price, change_value),
+        ))
+
+    if down_threshold is not None and change_value <= -down_threshold:
+        triggered.append(Alert(
+            symbol=symbol,
+            alert_type="pct_change",
+            current_value=change_value,
+            threshold=down_threshold,
+            watchlist_id=watchlist_id,
+            watchlist_name=watchlist_name,
+            timeframe=timeframe,
+            direction="down",
+            current_price=current_price,
+            reference_price=_estimate_reference_price(current_price, change_value),
+        ))
+
+
+def _fmt_usd(value: float | None) -> str:
+    """Format USD with readable precision across large/small caps."""
+    if value is None:
+        return "n/a"
+    abs_value = abs(value)
+    if abs_value >= 1000:
+        return f"${value:,.2f}"
+    if abs_value >= 1:
+        return f"${value:,.4f}"
+    if abs_value >= 0.01:
+        return f"${value:,.5f}"
+    return f"${value:,.8f}"
+
+
+def _fmt_pct(value: float, digits: int = 2) -> str:
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{value:.{digits}f}%"
+
+
+def _format_price_move(reference: float | None, current: float | None) -> str:
+    if reference is None or current is None:
+        return "Price: n/a"
+    return f"Price: {_fmt_usd(reference)} \u2192 <b>{_fmt_usd(current)}</b>"
+
+
 def format_alert(alert: Alert) -> str:
     """Render a single alert as an HTML Telegram message."""
+    symbol = html.escape(alert.symbol)
+
     if alert.alert_type == "price_above":
-        emoji = "\u26a0\ufe0f"  # warning sign
+        delta = alert.current_value - alert.threshold
+        delta_pct = (delta / alert.threshold * 100.0) if alert.threshold else 0.0
         return (
-            f"{emoji} <b>{alert.symbol}</b> above ${alert.threshold:,.2f}\n"
-            f"Current: <b>${alert.current_value:,.2f}</b>"
+            f"\U0001f6a8 <b>{symbol}</b> broke above target\n"
+            f"\u2022 {_format_price_move(alert.threshold, alert.current_price)}\n"
+            f"\u2022 Breach: +{_fmt_usd(delta)} ({_fmt_pct(delta_pct)})"
         )
     elif alert.alert_type == "price_below":
-        emoji = "\u26a0\ufe0f"
+        delta = alert.threshold - alert.current_value
+        delta_pct = (delta / alert.threshold * 100.0) if alert.threshold else 0.0
         return (
-            f"{emoji} <b>{alert.symbol}</b> below ${alert.threshold:,.2f}\n"
-            f"Current: <b>${alert.current_value:,.2f}</b>"
+            f"\U0001f6a8 <b>{symbol}</b> dropped below floor\n"
+            f"\u2022 {_format_price_move(alert.threshold, alert.current_price)}\n"
+            f"\u2022 Breach: -{_fmt_usd(delta)} ({_fmt_pct(-delta_pct)})"
         )
     elif alert.alert_type == "pct_change":
-        sign = "+" if alert.current_value >= 0 else ""
-        emoji = "\U0001f4c8" if alert.current_value >= 0 else "\U0001f4c9"  # chart up/down
+        move_icon = "\U0001f4c8" if alert.current_value >= 0 else "\U0001f4c9"
+        if alert.direction == "up":
+            trigger_label = "upside momentum trigger"
+            threshold_txt = f"+{alert.threshold:.1f}%"
+        elif alert.direction == "down":
+            trigger_label = "downside momentum trigger"
+            threshold_txt = f"-{alert.threshold:.1f}%"
+        else:
+            trigger_label = "momentum trigger"
+            threshold_txt = f"\u00b1{alert.threshold:.1f}%"
         return (
-            f"{emoji} <b>{alert.symbol}</b> moved {sign}{alert.current_value:.1f}% ({alert.timeframe})\n"
-            f"Threshold: \u00b1{alert.threshold:.1f}%"
+            f"{move_icon} <b>{symbol}</b> {alert.timeframe} {trigger_label}\n"
+            f"\u2022 Move: <b>{_fmt_pct(alert.current_value)}</b> (threshold {threshold_txt})\n"
+            f"\u2022 {_format_price_move(alert.reference_price, alert.current_price)}"
         )
-    return f"Alert: {alert.symbol} ({alert.alert_type})"
+    return f"Alert: {symbol} ({alert.alert_type})"
 
 
 def format_alerts_batch(alerts: list[Alert]) -> str:
@@ -228,8 +381,38 @@ def format_alerts_batch(alerts: list[Alert]) -> str:
         return ""
 
     wl_name = alerts[0].watchlist_name or alerts[0].watchlist_id
-    lines = [f"<b><u>Alerts: {wl_name}</u></b>\n"]
+    safe_name = html.escape(wl_name)
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    type_counts = {"price_above": 0, "price_below": 0, "pct_change": 0}
     for alert in alerts:
+        type_counts[alert.alert_type] = type_counts.get(alert.alert_type, 0) + 1
+
+    pct_up = sum(
+        1 for a in alerts
+        if a.alert_type == "pct_change" and a.direction == "up"
+    )
+    pct_down = sum(
+        1 for a in alerts
+        if a.alert_type == "pct_change" and a.direction == "down"
+    )
+
+    summary_parts = []
+    if type_counts["price_above"] or type_counts["price_below"]:
+        summary_parts.append(
+            f"Price levels: {type_counts['price_above'] + type_counts['price_below']}"
+        )
+    if type_counts["pct_change"]:
+        summary_parts.append(f"Momentum: {pct_up} up / {pct_down} down")
+    summary = " | ".join(summary_parts) if summary_parts else "Signals"
+
+    lines = [
+        f"<b>\U0001f6a8 Watchlist Alerts: {safe_name}</b>",
+        f"<i>{len(alerts)} trigger(s) \u00b7 {summary} \u00b7 {now_utc}</i>",
+        "",
+    ]
+
+    for alert in sorted(alerts, key=lambda a: (a.symbol, a.alert_type, a.direction, a.timeframe)):
         lines.append(format_alert(alert))
         lines.append("")  # blank line between alerts
 

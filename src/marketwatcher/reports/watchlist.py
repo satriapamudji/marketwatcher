@@ -62,6 +62,7 @@ def build_watchlist_report(
                 tokens_data.append({
                     "symbol": coin.get("symbol", symbol),
                     "name": coin.get("name", ""),
+                    "token_url": f"https://www.coingecko.com/en/coins/{cg_id}",
                     "price": _format_price(coin.get("price", 0)),
                     "price_raw": coin.get("price", 0),
                     "mcap": _format_usd(coin.get("mcap", 0)),
@@ -85,6 +86,7 @@ def build_watchlist_report(
                     tokens_data.append({
                         "symbol": symbol,
                         "name": "",
+                        "token_url": f"https://www.geckoterminal.com/{chain}/tokens/{address}",
                         "price": "N/A",
                         "price_raw": 0,
                         "mcap": "N/A",
@@ -102,6 +104,7 @@ def build_watchlist_report(
                 tokens_data.append({
                     "symbol": symbol,
                     "name": pool.name,
+                    "token_url": f"https://www.geckoterminal.com/{chain}/tokens/{address}",
                     "price": _format_price(price_val) if price_val else "N/A",
                     "price_raw": price_val or 0,
                     "mcap": _format_usd(mcap_val) if mcap_val else "N/A",
@@ -119,6 +122,11 @@ def build_watchlist_report(
             tokens_data.append({
                 "symbol": symbol,
                 "name": "",
+                "token_url": (
+                    f"https://www.coingecko.com/en/coins/{token_entry.get('coingecko_id', '')}"
+                    if token_type == "cex" and token_entry.get("coingecko_id")
+                    else f"https://www.geckoterminal.com/{token_entry.get('chain', '')}/tokens/{token_entry.get('address', '')}"
+                ),
                 "price": "ERR",
                 "price_raw": 0,
                 "mcap": "N/A",

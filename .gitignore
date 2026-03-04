@@ -43,6 +43,7 @@ ENV/
 *.log
 logs/
 onchain_history.jsonl
+config/*_streaks.json
 
 # Claude
 .claude/

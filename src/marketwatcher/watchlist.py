@@ -12,10 +12,14 @@ Token entry fields:
 Alert fields (optional, per-token):
 - alert_above: float, USD price ceiling
 - alert_below: float, USD price floor
-- alert_pct: float, ±% 24h change threshold
+- alert_pct: float, legacy ±% change threshold
+- alert_pct_up: float, +% change threshold (upside only)
+- alert_pct_down: float, -% change threshold (downside only)
 
 Watchlist-level alert defaults:
-- alert_pct: float, default ±% threshold for all tokens
+- alert_pct: float, legacy ±% threshold for all tokens
+- alert_pct_up: float, default +% threshold for all tokens
+- alert_pct_down: float, default -% threshold for all tokens
 - alert_chat_id: str, optional separate Telegram channel for alerts
 """
 
@@ -207,6 +211,8 @@ def set_token_alerts(
     alert_above: float | None = None,
     alert_below: float | None = None,
     alert_pct: float | None = None,
+    alert_pct_up: float | None = None,
+    alert_pct_down: float | None = None,
     config_dir: Path | None = None,
 ) -> bool:
     """Set alert thresholds on a token. Returns True if token found and updated."""
@@ -224,7 +230,16 @@ def set_token_alerts(
             if alert_below is not None:
                 token["alert_below"] = alert_below
             if alert_pct is not None:
-                token["alert_pct"] = alert_pct
+                token["alert_pct"] = abs(float(alert_pct))
+                token.pop("alert_pct_up", None)
+                token.pop("alert_pct_down", None)
+            if alert_pct_up is not None:
+                token["alert_pct_up"] = abs(float(alert_pct_up))
+            if alert_pct_down is not None:
+                token["alert_pct_down"] = abs(float(alert_pct_down))
+            if (alert_pct_up is not None or alert_pct_down is not None) and alert_pct is None:
+                # Directional thresholds override legacy symmetric threshold.
+                token.pop("alert_pct", None)
             save_watchlists(data, config_dir)
             logger.info(f"Set alerts for {symbol} in {watchlist_id}")
             return True
@@ -250,6 +265,8 @@ def clear_token_alerts(
             token.pop("alert_above", None)
             token.pop("alert_below", None)
             token.pop("alert_pct", None)
+            token.pop("alert_pct_up", None)
+            token.pop("alert_pct_down", None)
             save_watchlists(data, config_dir)
             logger.info(f"Cleared alerts for {symbol} in {watchlist_id}")
             return True
@@ -260,6 +277,8 @@ def clear_token_alerts(
 def set_watchlist_alerts(
     watchlist_id: str,
     alert_pct: float | None = None,
+    alert_pct_up: float | None = None,
+    alert_pct_down: float | None = None,
     alert_chat_id: str | None = None,
     config_dir: Path | None = None,
 ) -> bool:
@@ -270,7 +289,16 @@ def set_watchlist_alerts(
         if wl.get("id") != watchlist_id:
             continue
         if alert_pct is not None:
-            wl["alert_pct"] = alert_pct
+            wl["alert_pct"] = abs(float(alert_pct))
+            wl.pop("alert_pct_up", None)
+            wl.pop("alert_pct_down", None)
+        if alert_pct_up is not None:
+            wl["alert_pct_up"] = abs(float(alert_pct_up))
+        if alert_pct_down is not None:
+            wl["alert_pct_down"] = abs(float(alert_pct_down))
+        if (alert_pct_up is not None or alert_pct_down is not None) and alert_pct is None:
+            # Directional thresholds override legacy symmetric threshold.
+            wl.pop("alert_pct", None)
         if alert_chat_id is not None:
             if alert_chat_id:
                 wl["alert_chat_id"] = alert_chat_id
